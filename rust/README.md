@@ -118,15 +118,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         hce: true,
         freetext: true,
         figures: true,
+        write_csv: true,
+        extended: false,
         language: "english".to_string(),
         legacy_format: false,
     };
 
+    // Option A: Full 4-folder directory output
     let result = engine.run_cli_directory(
         Path::new("input_va.csv"),
         Path::new("smartva_output"),
         &options,
     )?;
+
+    // Option B: Score JSON payload in memory (converts input JSON -> in-memory CSV -> SmartVA pipeline -> in-memory CSV tables -> JSON / Protobuf)
+    let json_out = engine.score_json(
+        r#"{"sid":"VA-001","Id10013":"yes","Id10019":"male","ageInYears":62,"Id10147":"yes"}"#,
+        &options,
+    )?;
+    println!("JSON output: {}", json_out);
 
     println!("Scored {} VAs", result.total_vas);
     for pred in result.predictions.iter().take(5) {
@@ -140,18 +150,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 2. Drop-In CLI Usage (`smartva-rs`)
 
-`smartva-rs` accepts the exact same flags and positional arguments as upstream `smartva` (`va_cli.py`):
+`smartva-rs` accepts all upstream `smartva` (`va_cli.py`) flags plus `--csv`, `--charts`, `--json`, and `--format`:
 
 ```bash
+# 1. Full 4-folder CSV + .xlsx + .png directory output (default when OUTPUT_DIR is supplied)
 ./target/release/smartva-rs \
   --country IND \
   --hiv True \
   --malaria True \
   --hce True \
   --freetext True \
-  --figures True \
+  --csv True \
+  --charts True \
   /path/to/input.csv \
   /path/to/output_dir
+
+# 2. Score a single VA or batch from JSON (or CSV) in memory and return standard individual-level JSON
+#    (includes individual-cause-of-death.csv, {module}-predictions.csv, {module}-likelihoods.csv,
+#     {module}-tariff-scores.csv, {module}-tariff-ranks.csv, {module}-external-ranks.csv; omits CSMF)
+./target/release/smartva-rs \
+  --country IND \
+  --json '{"sid":"VA-001","Id10013":"yes","Id10019":"male","ageInYears":62,"Id10147":"yes"}' \
+  --format json
+
+# 3. Return extended cohort-level JSON (adds csmf.csv, {module}-csmf.csv, gbd-level1-csmf.csv,
+#    causes-of-death.csv, VA-data-age-groupings.csv, {module}-endorsement-rates.csv, and report.txt)
+./target/release/smartva-rs \
+  --country IND \
+  --format json-extended \
+  /path/to/input.csv
+
+# 4. Return Protocol Buffers (proto3 wire format matching proto/smartva.proto)
+./target/release/smartva-rs \
+  --country IND \
+  --format protobuf \
+  --output-file result.pb \
+  /path/to/input.csv
 ```
 
 List all 188 supported ISO-3 country codes:

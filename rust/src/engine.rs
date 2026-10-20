@@ -23,7 +23,10 @@ use crate::data::{
 use crate::ldap::{eval_ldap, evaluate_module_rules};
 use crate::stemmer::stem_porter2;
 use crate::xlsx;
-use crate::{SmartVaCliDirectoryResult, SmartVaError, SmartVaPrediction, SmartVaRunOptions};
+use crate::{
+    SmartVaAgeGroupingRow, SmartVaCausesOfDeathRow, SmartVaCliDirectoryResult, SmartVaCsmfRow,
+    SmartVaError, SmartVaGbdCsmfRow, SmartVaPrediction, SmartVaRunOptions,
+};
 
 const MODULES: [&str; 3] = ["adult", "child", "neonate"];
 
@@ -291,10 +294,24 @@ fn who_questionnaire_test(headers: &[String]) -> bool {
     }
     let matches = headers.iter().filter(|h| is_who_header(h)).count();
     (matches as f64) / (headers.len() as f64) > 0.80
+        || headers
+            .iter()
+            .any(|h| h == "Id10013" || h == "ageInYears" || h == "ageInDays")
 }
 
-fn run_who_prep(cleanheaders_path: &Path, who_2016: bool) -> Result<(), SmartVaError> {
-    let (_, mut matrix) = read_csv_matrix(cleanheaders_path)?;
+fn project_matrix_to_headers(headers: &[String], matrix: &mut [Row]) {
+    let keep: HashSet<&str> = headers.iter().map(|s| s.as_str()).collect();
+    for row in matrix {
+        row.retain(|k, _| keep.contains(k.as_str()));
+        for h in headers {
+            if !row.contains_key(h) {
+                row.insert(h.clone(), String::new());
+            }
+        }
+    }
+}
+
+fn who_prep_in_memory(matrix: &mut [Row], who_2016: bool) -> Vec<String> {
     let mut headers_set: BTreeSet<String> = BTreeSet::new();
     for &h in who_data::ADDITIONAL_HEADERS {
         headers_set.insert(h.to_string());
@@ -325,7 +342,7 @@ fn run_who_prep(cleanheaders_path: &Path, who_2016: bool) -> Result<(), SmartVaE
         headers_set.insert(vcol.to_string());
     }
 
-    for row in &mut matrix {
+    for row in matrix.iter_mut() {
         // 1. determine_consent
         if let Some(v) = row.get("Id10013") {
             let c = if v == "yes" { "1" } else { "0" };
@@ -458,6 +475,13 @@ fn run_who_prep(cleanheaders_path: &Path, who_2016: bool) -> Result<(), SmartVaE
     }
 
     let sorted_headers: Vec<String> = headers_set.into_iter().collect();
+    project_matrix_to_headers(&sorted_headers, matrix);
+    sorted_headers
+}
+
+fn run_who_prep(cleanheaders_path: &Path, who_2016: bool) -> Result<(), SmartVaError> {
+    let (_, mut matrix) = read_csv_matrix(cleanheaders_path)?;
+    let sorted_headers = who_prep_in_memory(&mut matrix, who_2016);
     write_csv_matrix(cleanheaders_path, &sorted_headers, &matrix)
 }
 
@@ -701,15 +725,12 @@ fn who_map_redundant_child_age_data(row: &mut Row) {
     }
 }
 
-/// Run `CommonPrep` on `cleanheaders.csv`, returning `(has_adult, has_child, has_neonate)`.
-fn run_common_prep(
-    intermediate_dir: &Path,
+fn common_prep_in_memory(
+    mut headers: Vec<String>,
+    matrix: Vec<Row>,
     short_form: bool,
     loggers: &mut ReportLoggers,
-) -> Result<(bool, bool, bool), SmartVaError> {
-    let cleanheaders_path = intermediate_dir.join("cleanheaders.csv");
-    let (mut headers, matrix) = read_csv_matrix(&cleanheaders_path)?;
-
+) -> (Vec<String>, HashMap<&'static str, Vec<Row>>) {
     let mut additional_pairs: Vec<(String, String)> = Vec::new();
     let mut additional_seen: HashSet<String> = HashSet::new();
     for &k in common_data::ADDITIONAL_HEADERS {
@@ -743,7 +764,7 @@ fn run_common_prep(
 
     let word_subs: HashMap<&str, &str> = common_data::WORD_SUBS.iter().copied().collect();
 
-    let mut matrix_data: HashMap<&str, Vec<Row>> = HashMap::from([
+    let mut matrix_data: HashMap<&'static str, Vec<Row>> = HashMap::from([
         ("adult", Vec::new()),
         ("child", Vec::new()),
         ("neonate", Vec::new()),
@@ -964,6 +985,25 @@ fn run_common_prep(
         matrix_data.get_mut(target_key).unwrap().push(row);
     }
 
+    for rows in matrix_data.values_mut() {
+        if !rows.is_empty() {
+            project_matrix_to_headers(&headers, rows);
+        }
+    }
+
+    (headers, matrix_data)
+}
+
+/// Run `CommonPrep` on `cleanheaders.csv`, returning `(has_adult, has_child, has_neonate)`.
+fn run_common_prep(
+    intermediate_dir: &Path,
+    short_form: bool,
+    loggers: &mut ReportLoggers,
+) -> Result<(bool, bool, bool), SmartVaError> {
+    let cleanheaders_path = intermediate_dir.join("cleanheaders.csv");
+    let (headers, matrix) = read_csv_matrix(&cleanheaders_path)?;
+    let (headers, matrix_data) = common_prep_in_memory(headers, matrix, short_form, loggers);
+
     for (age_key, rows) in &matrix_data {
         if !rows.is_empty() {
             let out_path = intermediate_dir.join(format!("{}-prepped.csv", age_key));
@@ -1154,12 +1194,13 @@ fn process_binary_vars_in_place(row: &mut Row, map: &[(&str, BinaryConversionSpe
     }
 }
 
-fn run_pre_symptom_prep(
-    intermediate_dir: &Path,
+fn pre_symptom_prep_in_memory(
     module: &str,
+    mut headers: Vec<String>,
+    mut matrix: Vec<Row>,
     short_form: bool,
     loggers: &mut ReportLoggers,
-) -> Result<(), SmartVaError> {
+) -> (Vec<String>, Vec<Row>) {
     let cfg = get_pre_symptom_config(module);
     let default_fill = if short_form {
         cfg.default_fill_short
@@ -1174,9 +1215,6 @@ fn run_pre_symptom_prep(
             }
         }
     }
-
-    let in_path = intermediate_dir.join(format!("{}-prepped.csv", cfg.age_group));
-    let (mut headers, mut matrix) = read_csv_matrix(&in_path)?;
 
     // Build additional_data in exact order
     let mut additional_map: Vec<(String, String)> = Vec::new();
@@ -1493,6 +1531,21 @@ fn run_pre_symptom_prep(
         }
     }
 
+    project_matrix_to_headers(&headers, &mut matrix);
+    (headers, matrix)
+}
+
+fn run_pre_symptom_prep(
+    intermediate_dir: &Path,
+    module: &str,
+    short_form: bool,
+    loggers: &mut ReportLoggers,
+) -> Result<(), SmartVaError> {
+    let cfg = get_pre_symptom_config(module);
+    let in_path = intermediate_dir.join(format!("{}-prepped.csv", cfg.age_group));
+    let (headers, matrix) = read_csv_matrix(&in_path)?;
+    let (headers, matrix) =
+        pre_symptom_prep_in_memory(module, headers, matrix, short_form, loggers);
     let out_path = intermediate_dir.join(format!("{}-presymptom.csv", cfg.age_group));
     write_csv_matrix(&out_path, &headers, &matrix)
 }
@@ -1579,9 +1632,7 @@ fn process_weight_sd_vars(
     }
 }
 
-fn run_rules_prep(intermediate_dir: &Path, module: &str) -> Result<(), SmartVaError> {
-    let in_path = intermediate_dir.join(format!("{}-presymptom.csv", module));
-    let (mut headers, mut matrix) = read_csv_matrix(&in_path)?;
+fn rules_prep_in_memory(module: &str, mut headers: Vec<String>, mut matrix: Vec<Row>) -> (Vec<String>, Vec<Row>) {
     headers.push("cause".to_string());
     for row in &mut matrix {
         if !row.contains_key("cause") {
@@ -1591,6 +1642,14 @@ fn run_rules_prep(intermediate_dir: &Path, module: &str) -> Result<(), SmartVaEr
             row.insert("cause".to_string(), cause_id.to_string());
         }
     }
+    project_matrix_to_headers(&headers, &mut matrix);
+    (headers, matrix)
+}
+
+fn run_rules_prep(intermediate_dir: &Path, module: &str) -> Result<(), SmartVaError> {
+    let in_path = intermediate_dir.join(format!("{}-presymptom.csv", module));
+    let (headers, matrix) = read_csv_matrix(&in_path)?;
+    let (headers, matrix) = rules_prep_in_memory(module, headers, matrix);
     let out_path = intermediate_dir.join(format!("{}-logic-rules.csv", module));
     write_csv_matrix(&out_path, &headers, &matrix)
 }
@@ -1658,14 +1717,13 @@ fn get_symptom_config(module: &str) -> SymptomConfig {
     }
 }
 
-fn run_symptom_prep(
-    intermediate_dir: &Path,
+fn symptom_prep_in_memory(
     module: &str,
+    mut headers: Vec<String>,
+    mut matrix: Vec<Row>,
     loggers: &mut ReportLoggers,
-) -> Result<(), SmartVaError> {
+) -> (Vec<String>, Vec<Row>) {
     let cfg = get_symptom_config(module);
-    let in_path = intermediate_dir.join(format!("{}-logic-rules.csv", cfg.age_group));
-    let (mut headers, mut matrix) = read_csv_matrix(&in_path)?;
 
     let existing_set: HashSet<String> = headers.iter().cloned().collect();
     let mut add_headers = Vec::new();
@@ -1786,6 +1844,19 @@ fn run_symptom_prep(
         row.insert("restricted".to_string(), restricted_str);
     }
 
+    project_matrix_to_headers(&headers, &mut matrix);
+    (headers, matrix)
+}
+
+fn run_symptom_prep(
+    intermediate_dir: &Path,
+    module: &str,
+    loggers: &mut ReportLoggers,
+) -> Result<(), SmartVaError> {
+    let cfg = get_symptom_config(module);
+    let in_path = intermediate_dir.join(format!("{}-logic-rules.csv", cfg.age_group));
+    let (headers, matrix) = read_csv_matrix(&in_path)?;
+    let (headers, matrix) = symptom_prep_in_memory(module, headers, matrix, loggers);
     let out_path = intermediate_dir.join(format!("{}-symptom.csv", cfg.age_group));
     write_csv_matrix(&out_path, &headers, &matrix)
 }
@@ -2044,15 +2115,20 @@ fn get_or_build_trained_model(
     struct ValidatedVa {
         sid: String,
         cause: i32,
+        freq: usize,
         scores: Vec<f64>,
     }
 
     let mut validated_vas: Vec<ValidatedVa> = Vec::new();
-    let mut uniform_indices: Vec<usize> = Vec::new();
+    let mut n_uniform: usize = 0;
 
     for rec_res in v_rdr.records() {
         let rec = rec_res.map_err(|e| SmartVaError::CsvError(e.to_string()))?;
-        let sid = rec.get(sid_idx).unwrap_or("").to_string();
+        let sid = rec.get(sid_idx).unwrap_or("");
+        let freq = freq_map.get(sid).copied().unwrap_or(0);
+        if freq == 0 {
+            continue;
+        }
         let cause = rec
             .get(va46_idx)
             .unwrap_or("0")
@@ -2075,13 +2151,20 @@ fn get_or_build_trained_model(
             }
             scores.push(sum);
         }
-        let freq = freq_map.get(sid.as_str()).copied().unwrap_or(0);
-        let va_idx = validated_vas.len();
-        validated_vas.push(ValidatedVa { sid, cause, scores });
-        uniform_indices.extend(std::iter::repeat_n(va_idx, freq));
+        n_uniform += freq;
+        validated_vas.push(ValidatedVa {
+            sid: sid.to_string(),
+            cause,
+            freq,
+            scores,
+        });
     }
 
-    let n_uniform = uniform_indices.len();
+    // Sort unique validated VAs once by sid ascending so tie-breaking on (-score, sid)
+    // is reduced to comparing integer index `ia.cmp(&ib)`.
+    validated_vas.sort_by(|a, b| a.sid.cmp(&b.sid));
+    let base_indices: Vec<usize> = (0..validated_vas.len()).collect();
+
     let overall_cutoff = (n_uniform as f64) * cfg.cutoff_pos;
     let thresholds = [0.25_f64, 0.5_f64, 0.75_f64];
 
@@ -2090,35 +2173,29 @@ fn get_or_build_trained_model(
     let mut likelihoods = BTreeMap::new();
 
     for (c_pos, &cause) in cause_list.iter().enumerate() {
-        let mut sorted_idx = uniform_indices.clone();
-        sorted_idx.sort_by(|&ia, &ib| {
-            let va_a = &validated_vas[ia];
-            let va_b = &validated_vas[ib];
-            let neg_a = -va_a.scores[c_pos];
-            let neg_b = -va_b.scores[c_pos];
-            neg_a
-                .total_cmp(&neg_b)
-                .then_with(|| va_a.sid.cmp(&va_b.sid))
+        let mut sorted_unique = base_indices.clone();
+        sorted_unique.sort_by(|&ia, &ib| {
+            let neg_a = -validated_vas[ia].scores[c_pos];
+            let neg_b = -validated_vas[ib].scores[c_pos];
+            neg_a.total_cmp(&neg_b).then_with(|| ia.cmp(&ib))
         });
 
-        let low_to_high: Vec<f64> = sorted_idx
-            .iter()
-            .rev()
-            .map(|&i| validated_vas[i].scores[c_pos])
-            .collect();
+        let mut low_to_high: Vec<f64> = Vec::with_capacity(n_uniform);
+        for &va_i in sorted_unique.iter().rev() {
+            let va = &validated_vas[va_i];
+            low_to_high.extend(std::iter::repeat_n(va.scores[c_pos], va.freq));
+        }
         uniform_scores.insert(cause, low_to_high);
 
-        let ranks_for_cause: Vec<usize> = sorted_idx
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &va_i)| {
-                if validated_vas[va_i].cause == cause {
-                    Some(i + 1)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut ranks_for_cause: Vec<usize> = Vec::new();
+        let mut rank_offset = 0usize;
+        for &va_i in &sorted_unique {
+            let va = &validated_vas[va_i];
+            if va.cause == cause {
+                ranks_for_cause.extend((rank_offset + 1)..=(rank_offset + va.freq));
+            }
+            rank_offset += va.freq;
+        }
         let n_ranks = ranks_for_cause.len();
         let cutoff_val = ranks_for_cause[((n_ranks as f64) * cfg.cutoff_pos) as usize];
         cutoffs.insert(cause, cutoff_val);
@@ -2281,37 +2358,32 @@ fn load_undetermined_weights(
     Ok(weights)
 }
 
-fn run_tariff_prep(
-    output_dir: &Path,
-    intermediate_dir: &Path,
+struct TariffModuleResult {
+    model: Arc<TrainedModuleModel>,
+    user_data: Vec<ScoredVaRecord>,
+    cause_counts: BTreeMap<String, f64>,
+    counts_by_sex: HashMap<i32, BTreeMap<String, f64>>,
+    pred_rows: Vec<Vec<String>>,
+    mp_rows: Vec<Vec<String>>,
+    predictions: Vec<SmartVaPrediction>,
+}
+
+fn tariff_prep_in_memory(
     module: &str,
+    symptom_rows: &[Row],
     short_form: bool,
     options: &SmartVaRunOptions,
     iso3: Option<&str>,
     loggers: &mut ReportLoggers,
-) -> Result<(), SmartVaError> {
+) -> Result<TariffModuleResult, SmartVaError> {
     let cfg = get_tariff_config(module);
     let model = get_or_build_trained_model(module, options.hce, options.freetext, short_form)?;
-
-    // Write {module}-cutoffs.txt
-    let cutoffs_path = intermediate_dir.join(format!("{}-cutoffs.txt", cfg.age_group));
-    {
-        let mut f = File::create(&cutoffs_path)
-            .map_err(|e| SmartVaError::IoError(e.to_string()))?;
-        for &c in &model.cause_list {
-            writeln!(f, "{} : {}", c, model.cutoffs[&c])
-                .map_err(|e| SmartVaError::IoError(e.to_string()))?;
-        }
-    }
-
-    let symptom_path = intermediate_dir.join(format!("{}-symptom.csv", cfg.age_group));
-    let (_, symptom_rows) = read_csv_matrix(&symptom_path)?;
 
     let drop_keys: HashSet<&str> =
         HashSet::from(["sid", "real_age", "real_gender", "cause", "restricted"]);
 
     let mut user_data: Vec<ScoredVaRecord> = Vec::with_capacity(symptom_rows.len());
-    for row in &symptom_rows {
+    for row in symptom_rows {
         let endorsements: HashSet<String> = row
             .iter()
             .filter_map(|(k, v)| {
@@ -2375,14 +2447,6 @@ fn run_tariff_prep(
             va.ranks.insert(cause, r);
         }
     }
-
-    // write external-ranks
-    write_tariff_intermediate_ranks(
-        &intermediate_dir.join(format!("{}-external-ranks.csv", cfg.age_group)),
-        &model.cause_list,
-        &user_data,
-        true,
-    )?;
 
     // mask_ranks
     let lowest_rank = (model.uniform_len as f64) + 0.5;
@@ -2642,12 +2706,8 @@ fn run_tariff_prep(
             va.sex.clone(),
         ]);
     }
-    write_csv_rows(
-        &output_dir.join(format!("{}-predictions.csv", cfg.age_group)),
-        &pred_rows,
-    )?;
 
-    // write_multiple_predictions_csv and build LikelihoodWorkbookRow
+    // write_multiple_predictions_csv and build SmartVaPrediction
     let likelihood_names = ["Very Likely", "Likely", "Somewhat Likely", "Possible"];
     let symp_desc_map: HashMap<&str, &str> = cfg.symptom_descriptions.iter().copied().collect();
     let mut symp_order: HashMap<&str, usize> = HashMap::new();
@@ -2672,6 +2732,8 @@ fn run_tariff_prep(
         "all_symptoms".to_string(),
     ]);
 
+    let mut predictions = Vec::with_capacity(user_data.len());
+
     for va in &user_data {
         let sex_label = match va.sex.as_str() {
             "1" => "Male",
@@ -2679,6 +2741,9 @@ fn run_tariff_prep(
             _ => "Missing",
         };
         let mut csv_row = vec![va.sid.clone(), va.age.clone(), sex_label.to_string()];
+        let mut slots: [(Option<String>, Option<String>, Option<String>); 3] =
+            [(None, None, None), (None, None, None), (None, None, None)];
+
         if !va.likelihoods.is_empty() {
             for (c_idx, &(cause34, like_idx)) in va.likelihoods.iter().enumerate() {
                 if c_idx == 3 {
@@ -2703,9 +2768,19 @@ fn run_tariff_prep(
                 csv_row.push(cause_name.to_string());
                 csv_row.push(like_name.to_string());
                 csv_row.push(sym_desc.to_string());
+                slots[c_idx] = (
+                    Some(cause_name.to_string()),
+                    Some(like_name.to_string()),
+                    if sym_desc.is_empty() {
+                        None
+                    } else {
+                        Some(sym_desc.to_string())
+                    },
+                );
             }
         } else {
             csv_row.push("Undetermined".to_string());
+            slots[0].0 = Some("Undetermined".to_string());
         }
         while csv_row.len() < 12 {
             csv_row.push(String::new());
@@ -2716,41 +2791,132 @@ fn run_tariff_prep(
             .filter_map(|s| symp_desc_map.get(s.as_str()).copied())
             .collect();
         endorsed_descs.sort_by_key(|d| symp_order.get(d).copied().unwrap_or(usize::MAX));
-        csv_row.push(endorsed_descs.join("; "));
+        let all_symp_str = endorsed_descs.join("; ");
+        csv_row.push(all_symp_str.clone());
         mp_rows.push(csv_row);
+
+        let icd = icds::get_icd(cfg.age_group, &va.cause34_name)
+            .unwrap_or("")
+            .to_string();
+        predictions.push(SmartVaPrediction {
+            sid: va.sid.clone(),
+            module: Some(cfg.age_group.to_string()),
+            national_id: String::new(),
+            name: String::new(),
+            name2: String::new(),
+            surname: String::new(),
+            surname2: String::new(),
+            geography1: String::new(),
+            geography2: String::new(),
+            geography3: String::new(),
+            geography4: String::new(),
+            geography5: String::new(),
+            cause34: va.cause34_name.clone(),
+            cause_list_number: va.cause34.map(|c| c.to_string()).unwrap_or_default(),
+            icd10: icd,
+            age: if va.age.is_empty() {
+                None
+            } else {
+                va.age.parse::<f64>().ok()
+            },
+            sex: va.sex.parse::<i32>().ok(),
+            birth_date: String::new(),
+            death_date: String::new(),
+            interview_date: String::new(),
+            cause1: slots[0].0.clone(),
+            likelihood1: slots[0].1.clone(),
+            key_symptom1: slots[0].2.clone(),
+            cause2: slots[1].0.clone(),
+            likelihood2: slots[1].1.clone(),
+            key_symptom2: slots[1].2.clone(),
+            cause3: slots[2].0.clone(),
+            likelihood3: slots[2].1.clone(),
+            key_symptom3: slots[2].2.clone(),
+            all_symptoms: Some(all_symp_str),
+        });
     }
 
+    Ok(TariffModuleResult {
+        model,
+        user_data,
+        cause_counts,
+        counts_by_sex,
+        pred_rows,
+        mp_rows,
+        predictions,
+    })
+}
+
+fn run_tariff_prep(
+    output_dir: &Path,
+    intermediate_dir: &Path,
+    module: &str,
+    short_form: bool,
+    options: &SmartVaRunOptions,
+    iso3: Option<&str>,
+    loggers: &mut ReportLoggers,
+) -> Result<Vec<SmartVaPrediction>, SmartVaError> {
+    let cfg = get_tariff_config(module);
+    let symptom_path = intermediate_dir.join(format!("{}-symptom.csv", cfg.age_group));
+    let (_, symptom_rows) = read_csv_matrix(&symptom_path)?;
+
+    let res = tariff_prep_in_memory(module, &symptom_rows, short_form, options, iso3, loggers)?;
+
+    // Write {module}-cutoffs.txt
+    let cutoffs_path = intermediate_dir.join(format!("{}-cutoffs.txt", cfg.age_group));
+    {
+        let mut f = File::create(&cutoffs_path)
+            .map_err(|e| SmartVaError::IoError(e.to_string()))?;
+        for &c in &res.model.cause_list {
+            writeln!(f, "{} : {}", c, res.model.cutoffs[&c])
+                .map_err(|e| SmartVaError::IoError(e.to_string()))?;
+        }
+    }
+
+    // write external-ranks
+    write_tariff_intermediate_ranks(
+        &intermediate_dir.join(format!("{}-external-ranks.csv", cfg.age_group)),
+        &res.model.cause_list,
+        &res.user_data,
+        true,
+    )?;
+
+    write_csv_rows(
+        &output_dir.join(format!("{}-predictions.csv", cfg.age_group)),
+        &res.pred_rows,
+    )?;
+
     let mp_csv_path = output_dir.join(format!("{}-likelihoods.csv", cfg.age_group));
-    write_csv_rows(&mp_csv_path, &mp_rows)?;
+    write_csv_rows(&mp_csv_path, &res.mp_rows)?;
 
     // write_csmf
     write_raw_csmf_file(
         &output_dir.join(format!("{}-csmf.csv", cfg.age_group)),
-        &cause_counts,
+        &res.cause_counts,
     )?;
     write_raw_csmf_file(
         &output_dir.join(format!("{}-male-csmf.csv", cfg.age_group)),
-        &counts_by_sex[&1],
+        &res.counts_by_sex[&1],
     )?;
     write_raw_csmf_file(
         &output_dir.join(format!("{}-female-csmf.csv", cfg.age_group)),
-        &counts_by_sex[&2],
+        &res.counts_by_sex[&2],
     )?;
 
     // write tariff-scores and tariff-ranks
     write_tariff_intermediate_scores(
         &intermediate_dir.join(format!("{}-tariff-scores.csv", cfg.age_group)),
-        &model.cause_list,
-        &user_data,
+        &res.model.cause_list,
+        &res.user_data,
     )?;
     write_tariff_intermediate_ranks(
         &intermediate_dir.join(format!("{}-tariff-ranks.csv", cfg.age_group)),
-        &model.cause_list,
-        &user_data,
+        &res.model.cause_list,
+        &res.user_data,
         false,
     )?;
 
-    Ok(())
+    Ok(res.predictions)
 }
 
 fn write_raw_csmf_file(path: &Path, counts: &BTreeMap<String, f64>) -> Result<(), SmartVaError> {
@@ -2765,11 +2931,10 @@ fn write_raw_csmf_file(path: &Path, counts: &BTreeMap<String, f64>) -> Result<()
     write_csv_rows(path, &rows)
 }
 
-fn write_tariff_intermediate_scores(
-    path: &Path,
+fn build_tariff_scores_rows(
     cause_list: &[i32],
     user_data: &[ScoredVaRecord],
-) -> Result<(), SmartVaError> {
+) -> Vec<Vec<String>> {
     let mut rows = Vec::with_capacity(user_data.len() + 1);
     let mut hdr = Vec::with_capacity(cause_list.len() + 1);
     hdr.push("sid".to_string());
@@ -2788,15 +2953,23 @@ fn write_tariff_intermediate_scores(
         }
         rows.push(r);
     }
-    write_csv_rows(path, &rows)
+    rows
 }
 
-fn write_tariff_intermediate_ranks(
+fn write_tariff_intermediate_scores(
     path: &Path,
     cause_list: &[i32],
     user_data: &[ScoredVaRecord],
-    external: bool,
 ) -> Result<(), SmartVaError> {
+    let rows = build_tariff_scores_rows(cause_list, user_data);
+    write_csv_rows(path, &rows)
+}
+
+fn build_tariff_ranks_rows(
+    cause_list: &[i32],
+    user_data: &[ScoredVaRecord],
+    external: bool,
+) -> Vec<Vec<String>> {
     let mut rows = Vec::with_capacity(user_data.len() + 1);
     let mut hdr = Vec::with_capacity(cause_list.len() + 1);
     hdr.push("sid".to_string());
@@ -2815,6 +2988,16 @@ fn write_tariff_intermediate_ranks(
         }
         rows.push(r);
     }
+    rows
+}
+
+fn write_tariff_intermediate_ranks(
+    path: &Path,
+    cause_list: &[i32],
+    user_data: &[ScoredVaRecord],
+    external: bool,
+) -> Result<(), SmartVaError> {
+    let rows = build_tariff_ranks_rows(cause_list, user_data, external);
     write_csv_rows(path, &rows)
 }
 
@@ -3478,6 +3661,220 @@ pub fn warm_all_models() -> Result<(), SmartVaError> {
     Ok(())
 }
 
+fn build_endorsement_rates_rows(
+    module: &str,
+    s_headers: &[String],
+    s_rows: &[Row],
+    pred_causes: &[String],
+    short_form: bool,
+    free_text: bool,
+    hce: bool,
+) -> Vec<Vec<String>> {
+    let cfg = get_tariff_config(module);
+    let symp_desc: HashMap<&str, &str> = cfg.symptom_descriptions.iter().copied().collect();
+
+    let symptoms: Vec<String> = s_headers
+        .iter()
+        .filter(|h| {
+            let b = h.as_bytes();
+            b.len() >= 2 && b[0] == b's' && b[1..].iter().all(|c| c.is_ascii_digit())
+        })
+        .cloned()
+        .collect();
+
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut endorsements: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for (s_row, cause) in s_rows.iter().zip(pred_causes.iter()) {
+        *counts.entry(cause.clone()).or_insert(0) += 1;
+        let c_end = endorsements.entry(cause.clone()).or_default();
+        for symp in &symptoms {
+            if safe_float(s_row.get(symp).map(|s| s.as_str())) != 0.0 {
+                *c_end.entry(symp.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut drop: HashSet<&str> = HashSet::new();
+    if short_form {
+        drop.extend(cfg.short_form_drop_list.iter().copied());
+    }
+    if !hce {
+        drop.extend(cfg.hce_drop_list.iter().copied());
+    }
+    let causes_sorted: Vec<String> = counts.keys().cloned().collect();
+    let mut er_rows = Vec::new();
+    let mut hdr = vec!["symptom".to_string(), "description".to_string()];
+    hdr.extend(causes_sorted.iter().cloned());
+    er_rows.push(hdr);
+
+    for symp in &symptoms {
+        if drop.contains(symp.as_str()) || (!free_text && symp.starts_with("s9999")) {
+            continue;
+        }
+        let mut r = Vec::with_capacity(causes_sorted.len() + 2);
+        r.push(symp.clone());
+        r.push(symp_desc.get(symp.as_str()).copied().unwrap_or("").to_string());
+        for cause in &causes_sorted {
+            let total = counts[cause] as f64;
+            let cnt = endorsements
+                .get(cause)
+                .and_then(|m| m.get(symp).copied())
+                .unwrap_or(0) as f64;
+            let rate = if total > 0.0 { cnt / total } else { 0.0 };
+            r.push(format!("{}%", round_py(rate * 100.0, 1)));
+        }
+        er_rows.push(r);
+    }
+    er_rows
+}
+
+fn build_f1_headers() -> Vec<String> {
+    [
+        "sid",
+        "national_id",
+        "name",
+        "name2",
+        "surname",
+        "surname2",
+        "geography1",
+        "geography2",
+        "geography3",
+        "geography4",
+        "geography5",
+        "cause34",
+        "cause list #",
+        "icd10",
+        "age",
+        "sex",
+        "birth_date",
+        "death_date",
+        "interview_date",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn build_f1_row_from_prediction(p: &SmartVaPrediction) -> Vec<String> {
+    vec![
+        p.sid.clone(),
+        p.national_id.clone(),
+        p.name.clone(),
+        p.name2.clone(),
+        p.surname.clone(),
+        p.surname2.clone(),
+        p.geography1.clone(),
+        p.geography2.clone(),
+        p.geography3.clone(),
+        p.geography4.clone(),
+        p.geography5.clone(),
+        p.cause34.clone(),
+        p.cause_list_number.clone(),
+        p.icd10.clone(),
+        p.age.map(py_float_str).unwrap_or_default(),
+        p.sex.map(|s| s.to_string()).unwrap_or_default(),
+        p.birth_date.clone(),
+        p.death_date.clone(),
+        p.interview_date.clone(),
+    ]
+}
+
+fn read_csv_raw_rows(path: &Path) -> Option<Vec<Vec<String>>> {
+    if !path.exists() {
+        return None;
+    }
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_path(path)
+        .ok()?;
+    let mut out = Vec::new();
+    for rec in rdr.records().flatten() {
+        out.push(rec.iter().map(|s| s.to_string()).collect());
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn enrich_prediction_from_prepped_row(pred: &mut SmartVaPrediction, raw_row: &Row) {
+    let mut interview_date = raw_row
+        .get("interviewdate")
+        .cloned()
+        .unwrap_or_default();
+    if is_invalid_interview_date(&interview_date) {
+        interview_date.clear();
+    }
+    pred.national_id = raw_row.get("gen_6_7").cloned().unwrap_or_default();
+    pred.name = raw_row.get("gen_5_0").cloned().unwrap_or_default();
+    pred.name2 = raw_row.get("gen_5_0c").cloned().unwrap_or_default();
+    pred.surname = raw_row.get("gen_5_0a").cloned().unwrap_or_default();
+    pred.surname2 = raw_row.get("gen_5_0a2").cloned().unwrap_or_default();
+    pred.geography1 = raw_row.get("gen_2_3a").cloned().unwrap_or_default();
+    pred.geography2 = raw_row.get("gen_2_3b").cloned().unwrap_or_default();
+    pred.geography3 = raw_row.get("gen_2_3c").cloned().unwrap_or_default();
+    pred.geography4 = raw_row.get("gen_2_3d").cloned().unwrap_or_default();
+    pred.geography5 = raw_row.get("gen_2_3e").cloned().unwrap_or_default();
+    pred.birth_date = make_output_date(
+        raw_row.get("gen_5_1a").map(|s| s.as_str()).unwrap_or(""),
+        raw_row.get("gen_5_1b").map(|s| s.as_str()).unwrap_or(""),
+        raw_row.get("gen_5_1c").map(|s| s.as_str()).unwrap_or(""),
+    );
+    pred.death_date = make_output_date(
+        raw_row.get("gen_5_3a").map(|s| s.as_str()).unwrap_or(""),
+        raw_row.get("gen_5_3b").map(|s| s.as_str()).unwrap_or(""),
+        raw_row.get("gen_5_3c").map(|s| s.as_str()).unwrap_or(""),
+    );
+    pred.interview_date = interview_date;
+}
+
+fn format_report_text(loggers: &ReportLoggers) -> String {
+    let mut out = String::new();
+    for line in &loggers.report_lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str("Quality summary:\n");
+    for (items, desc) in [
+        (&loggers.sids, "row(s) have duplicate or missing sids"),
+        (&loggers.refused, "row(s) declined the interview."),
+        (
+            &loggers.valid_consent,
+            "row(s) did not have a valid value for consent.",
+        ),
+        (
+            &loggers.valid_age,
+            "row(s) did not have valid age data and could not be analyzed.",
+        ),
+        (
+            &loggers.prediction,
+            "row(s) had multiple causes predicted with equal likelihood.",
+        ),
+    ] {
+        if !items.is_empty() {
+            out.push_str(&format!("{} {}\n", items.len(), desc));
+        }
+    }
+    out.push('\n');
+    out.push_str("Details:\n");
+    for items in [
+        &loggers.sids,
+        &loggers.refused,
+        &loggers.valid_consent,
+        &loggers.valid_age,
+        &loggers.prediction,
+    ] {
+        for line in items {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Execute the full SmartVA-Analyze pipeline in pure Rust, writing the complete 4-folder
 /// directory tree (`1-individual-cause-of-death/`, `2-csmf/`, `3-graphs-and-tables/`,
 /// `4-monitoring-and-quality/`) to `output_dir`.
@@ -3491,6 +3888,9 @@ pub fn run_smartva_pipeline_directory(
             "Input CSV file does not exist: {}",
             input_csv.display()
         )));
+    }
+    if !options.write_csv && !options.figures {
+        return run_smartva_csv_in_memory(input_csv, options);
     }
     let iso3 = resolve_country_iso3(&options.country)?;
     fs::create_dir_all(output_dir).map_err(|e| SmartVaError::IoError(e.to_string()))?;
@@ -3549,16 +3949,20 @@ pub fn run_smartva_pipeline_directory(
     let (adult_data, child_data, neonate_data) =
         run_common_prep(&intermediate_dir, short_form, &mut loggers)?;
 
+    let mut predictions = Vec::new();
+    let mut csv_tables: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
     for (module, has_data) in [
         ("adult", adult_data),
         ("child", child_data),
         ("neonate", neonate_data),
     ] {
         if has_data {
+            let prepped_file = intermediate_dir.join(format!("{}-prepped.csv", module));
+            let (_, prepped_rows) = read_csv_matrix(&prepped_file)?;
             run_pre_symptom_prep(&intermediate_dir, module, short_form, &mut loggers)?;
             run_rules_prep(&intermediate_dir, module)?;
             run_symptom_prep(&intermediate_dir, module, &mut loggers)?;
-            run_tariff_prep(
+            let mut mod_preds = run_tariff_prep(
                 output_dir,
                 &intermediate_dir,
                 module,
@@ -3567,6 +3971,16 @@ pub fn run_smartva_pipeline_directory(
                 iso3.as_deref(),
                 &mut loggers,
             )?;
+            for (pred, raw_row) in mod_preds.iter_mut().zip(prepped_rows.iter()) {
+                enrich_prediction_from_prepped_row(pred, raw_row);
+            }
+            for stub in ["tariff-scores.csv", "tariff-ranks.csv", "external-ranks.csv"] {
+                let name = format!("{}-{}", module, stub);
+                if let Some(rows) = read_csv_raw_rows(&intermediate_dir.join(&name)) {
+                    csv_tables.insert(name, rows);
+                }
+            }
+            predictions.extend(mod_preds);
         }
     }
 
@@ -3579,39 +3993,67 @@ pub fn run_smartva_pipeline_directory(
         &loggers,
     )?;
 
-    let xlsx_files_written = xlsx::generate_likelihood_xlsx_files(output_dir)
-        .map_err(|e| SmartVaError::ExecutionError(e.to_string()))?;
-    let png_charts_written = charts::generate_all_smartva_charts(output_dir, options.figures)
-        .map_err(|e| SmartVaError::ExecutionError(e.to_string()))?;
-
-    // Parse 1-individual-cause-of-death/individual-cause-of-death.csv and 2-csmf/*.csv for result struct
-    let mut predictions = Vec::new();
-    let ind_path = output_dir
-        .join("1-individual-cause-of-death")
-        .join("individual-cause-of-death.csv");
-    if ind_path.exists() {
-        let (_, rows) = read_csv_matrix(&ind_path)?;
-        for r in rows {
-            predictions.push(SmartVaPrediction {
-                sid: r.get("sid").cloned().unwrap_or_default(),
-                cause34: r.get("cause34").cloned().unwrap_or_default(),
-                icd10: r.get("icd10").cloned().unwrap_or_default(),
-                age: r.get("age").and_then(|s| s.parse::<f64>().ok()),
-                sex: r.get("sex").and_then(|s| s.parse::<i32>().ok()),
-                module: None,
-                cause1: None,
-                likelihood1: None,
-                key_symptom1: None,
-                cause2: None,
-                likelihood2: None,
-                key_symptom2: None,
-                cause3: None,
-                likelihood3: None,
-                key_symptom3: None,
-                all_symptoms: None,
-            });
+    let f1 = output_dir.join("1-individual-cause-of-death");
+    let f2 = output_dir.join("2-csmf");
+    let f3 = output_dir.join("3-graphs-and-tables");
+    let f4 = output_dir.join("4-monitoring-and-quality");
+    let f4_inter = f4.join("intermediate-files");
+    for (key, path) in [
+        (
+            "individual-cause-of-death.csv".to_string(),
+            f1.join("individual-cause-of-death.csv"),
+        ),
+        ("csmf.csv".to_string(), f2.join("csmf.csv")),
+        (
+            "gbd-level1-csmf.csv".to_string(),
+            f2.join("gbd-level1-csmf.csv"),
+        ),
+        (
+            "causes-of-death.csv".to_string(),
+            f3.join("causes-of-death.csv"),
+        ),
+        (
+            "VA-data-age-groupings.csv".to_string(),
+            f4.join("VA-data-age-groupings.csv"),
+        ),
+    ] {
+        if let Some(rows) = read_csv_raw_rows(&path) {
+            csv_tables.insert(key, rows);
         }
     }
+    for module in MODULES {
+        for (key, path) in [
+            (
+                format!("{}-predictions.csv", module),
+                f1.join(format!("{}-predictions.csv", module)),
+            ),
+            (
+                format!("{}-csmf.csv", module),
+                f2.join(format!("{}-csmf.csv", module)),
+            ),
+            (
+                format!("{}-likelihoods.csv", module),
+                f4_inter.join(format!("{}-likelihoods.csv", module)),
+            ),
+            (
+                format!("{}-endorsement-rates.csv", module),
+                f4_inter.join(format!("{}-endorsement-rates.csv", module)),
+            ),
+        ] {
+            if let Some(rows) = read_csv_raw_rows(&path) {
+                csv_tables.insert(key, rows);
+            }
+        }
+    }
+
+    let xlsx_files_written = if options.write_csv {
+        xlsx::generate_likelihood_xlsx_files(output_dir)
+            .map_err(|e| SmartVaError::ExecutionError(e.to_string()))?
+    } else {
+        0
+    };
+    let png_charts_written = charts::generate_all_smartva_charts(output_dir, options.figures)
+        .map_err(|e| SmartVaError::ExecutionError(e.to_string()))?;
 
     let read_csmf_map = |p: &Path| -> BTreeMap<String, f64> {
         let mut m = BTreeMap::new();
@@ -3626,15 +4068,635 @@ pub fn run_smartva_pipeline_directory(
         }
         m
     };
-    let f2 = output_dir.join("2-csmf");
+    let read_csmf_rows = |p: &Path| -> Vec<SmartVaCsmfRow> {
+        let mut out = Vec::new();
+        if let Ok((_, rows)) = read_csv_matrix(p) {
+            for r in rows {
+                out.push(SmartVaCsmfRow {
+                    cause34: r.get("cause34").cloned().unwrap_or_default(),
+                    cause_list_number: r.get("cause list #").cloned(),
+                    icd10: r.get("icd10").cloned().unwrap_or_default(),
+                    all: r.get("all").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    male: r.get("male").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                    female: r.get("female").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                });
+            }
+        }
+        out
+    };
+
+    let mut gbd_level1_csmf_rows = Vec::new();
+    if let Ok((_, rows)) = read_csv_matrix(&f2.join("gbd-level1-csmf.csv")) {
+        for r in rows {
+            gbd_level1_csmf_rows.push(SmartVaGbdCsmfRow {
+                cause: r.get("cause").cloned().unwrap_or_default(),
+                cause_name: r.get("cause_name").cloned().unwrap_or_default(),
+                csmf: r.get("CSMF").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+            });
+        }
+    }
+
+    let mut causes_of_death_rows = Vec::new();
+    if let Ok((_, rows)) = read_csv_matrix(&f3.join("causes-of-death.csv")) {
+        for r in rows {
+            causes_of_death_rows.push(SmartVaCausesOfDeathRow {
+                module: r.get("module").cloned().unwrap_or_default(),
+                cause34: r.get("cause34").cloned().unwrap_or_default(),
+                age: r.get("age").cloned().unwrap_or_default(),
+                sex: r.get("sex").cloned().unwrap_or_default(),
+                counts: r.get("counts").and_then(|s| s.parse().ok()).unwrap_or(0),
+            });
+        }
+    }
+
+    let mut age_groupings_rows = Vec::new();
+    if let Ok((_, rows)) = read_csv_matrix(&f4.join("VA-data-age-groupings.csv")) {
+        for r in rows {
+            age_groupings_rows.push(SmartVaAgeGroupingRow {
+                cause34: r.get("cause34").cloned().unwrap_or_default(),
+                icd10: r.get("icd10").cloned().unwrap_or_default(),
+                age_group: r.get("age group").cloned().unwrap_or_default(),
+                count: r.get("count").and_then(|s| s.parse().ok()).unwrap_or(0),
+                male_count: r
+                    .get("male (count)")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+                female_count: r
+                    .get("female (count)")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+            });
+        }
+    }
+
+    let csmf_all = read_csmf_map(&f2.join("csmf.csv"));
+    let csmf_adult = read_csmf_map(&f2.join("adult-csmf.csv"));
+    let csmf_child = read_csmf_map(&f2.join("child-csmf.csv"));
+    let csmf_neonate = read_csmf_map(&f2.join("neonate-csmf.csv"));
+    let csmf_rows = read_csmf_rows(&f2.join("csmf.csv"));
+    let csmf_adult_rows = read_csmf_rows(&f2.join("adult-csmf.csv"));
+    let csmf_child_rows = read_csmf_rows(&f2.join("child-csmf.csv"));
+    let csmf_neonate_rows = read_csmf_rows(&f2.join("neonate-csmf.csv"));
+
+    if !options.write_csv {
+        // User requested charts only (--csv false --charts true): remove CSV folders except 3-graphs-and-tables/*.png
+        let _ = fs::remove_dir_all(output_dir.join("1-individual-cause-of-death"));
+        let _ = fs::remove_dir_all(&f2);
+        let _ = fs::remove_dir_all(&f4);
+        let _ = fs::remove_file(f3.join("causes-of-death.csv"));
+    }
+
     Ok(SmartVaCliDirectoryResult {
         total_vas: predictions.len(),
         predictions,
-        csmf_all: read_csmf_map(&f2.join("csmf.csv")),
-        csmf_adult: read_csmf_map(&f2.join("adult-csmf.csv")),
-        csmf_child: read_csmf_map(&f2.join("child-csmf.csv")),
-        csmf_neonate: read_csmf_map(&f2.join("neonate-csmf.csv")),
+        csv_tables,
+        csmf_all,
+        csmf_adult,
+        csmf_child,
+        csmf_neonate,
+        csmf_rows,
+        csmf_adult_rows,
+        csmf_child_rows,
+        csmf_neonate_rows,
+        gbd_level1_csmf_rows,
+        causes_of_death_rows,
+        age_groupings_rows,
+        warnings: loggers.warnings.clone(),
+        report_text: format_report_text(&loggers),
         xlsx_files_written,
         png_charts_written,
     })
+}
+
+/// Execute the SmartVA-Analyze pipeline 100% in memory on `raw_headers` and `raw_rows`
+/// without writing any CSV files, `.xlsx` workbooks, or `.png` charts to disk.
+pub fn run_smartva_in_memory(
+    raw_headers: &[String],
+    raw_rows: &[Row],
+    options: &SmartVaRunOptions,
+) -> Result<SmartVaCliDirectoryResult, SmartVaError> {
+    if raw_headers.is_empty() || raw_rows.is_empty() {
+        return Err(SmartVaError::ExecutionError(
+            "Input data does not contain any rows.".to_string(),
+        ));
+    }
+    let iso3 = resolve_country_iso3(&options.country)?;
+    let mut loggers = ReportLoggers::default();
+
+    let mut headers: Vec<String> = raw_headers.iter().map(|h| format_header_name(h)).collect();
+    let mut matrix: Vec<Row> = Vec::with_capacity(raw_rows.len());
+    for raw_row in raw_rows {
+        let mut row = Row::with_capacity(headers.len());
+        for (raw_h, clean_h) in raw_headers.iter().zip(headers.iter()) {
+            let val = raw_row
+                .get(raw_h)
+                .or_else(|| raw_row.get(clean_h))
+                .cloned()
+                .unwrap_or_default();
+            row.insert(clean_h.clone(), val);
+        }
+        matrix.push(row);
+    }
+
+    let who_questionnaire = who_questionnaire_test(&headers);
+    let (short_form, who_2016, form_name) = if who_questionnaire {
+        let is_2016 = headers.iter().any(|h| h == "Id10219");
+        let name = if is_2016 {
+            "WHO 2016 Questionnaire"
+        } else {
+            "WHO 2022 Questionnaire"
+        };
+        (true, is_2016, name)
+    } else {
+        let is_short = headers.iter().any(|h| h == "adult_7_11");
+        let name = if is_short {
+            "PHMRC Shortened Questionnaire"
+        } else {
+            "PHMRC Full Questionnaire"
+        };
+        (is_short, false, name)
+    };
+    loggers.report_lines.push("Analysis parameters:".to_string());
+    loggers.report_lines.push(format!(
+        "- Country: {}",
+        iso3.as_deref().unwrap_or("None")
+    ));
+    loggers
+        .report_lines
+        .push(format!("- HIV Region: {}", options.hiv));
+    loggers
+        .report_lines
+        .push(format!("- Malaria Region: {}", options.malaria));
+    loggers.report_lines.push(String::new());
+    loggers
+        .report_lines
+        .push(format!("Detected {}", form_name));
+
+    if who_questionnaire {
+        headers = who_prep_in_memory(&mut matrix, who_2016);
+    }
+
+    let (common_headers, mut matrix_data) =
+        common_prep_in_memory(headers, matrix, short_form, &mut loggers);
+
+    let mut predictions = Vec::new();
+    let mut csv_tables: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
+    let f1_headers = build_f1_headers();
+    let mut all_f1_rows = vec![f1_headers.clone()];
+    let mut preds_by_mod: HashMap<&'static str, Vec<SmartVaPrediction>> = HashMap::new();
+    let mut mod_csmfs: HashMap<&'static str, HashMap<&'static str, BTreeMap<String, f64>>> =
+        HashMap::new();
+    let mut csmf_adult = BTreeMap::new();
+    let mut csmf_child = BTreeMap::new();
+    let mut csmf_neonate = BTreeMap::new();
+    let mut csmf_adult_rows = Vec::new();
+    let mut csmf_child_rows = Vec::new();
+    let mut csmf_neonate_rows = Vec::new();
+
+    for module in MODULES {
+        let mod_rows = matrix_data.remove(module).unwrap_or_default();
+        if mod_rows.is_empty() {
+            preds_by_mod.insert(module, Vec::new());
+            mod_csmfs.insert(
+                module,
+                HashMap::from([
+                    ("both", BTreeMap::new()),
+                    ("male", BTreeMap::new()),
+                    ("female", BTreeMap::new()),
+                ]),
+            );
+            csv_tables.insert(
+                format!("{}-csmf.csv", module),
+                vec![vec![
+                    "cause34".to_string(),
+                    "cause list #".to_string(),
+                    "icd10".to_string(),
+                    "all".to_string(),
+                    "male".to_string(),
+                    "female".to_string(),
+                ]],
+            );
+            continue;
+        }
+        let prepped_snapshot = mod_rows.clone();
+        let (ps_headers, ps_matrix) = pre_symptom_prep_in_memory(
+            module,
+            common_headers.clone(),
+            mod_rows,
+            short_form,
+            &mut loggers,
+        );
+        let (rules_headers, rules_matrix) = rules_prep_in_memory(module, ps_headers, ps_matrix);
+        let (symptom_headers, symptom_matrix) =
+            symptom_prep_in_memory(module, rules_headers, rules_matrix, &mut loggers);
+        let mut res = tariff_prep_in_memory(
+            module,
+            &symptom_matrix,
+            short_form,
+            options,
+            iso3.as_deref(),
+            &mut loggers,
+        )?;
+        let mut mod_f1_rows = vec![f1_headers.clone()];
+        for (pred, raw_row) in res.predictions.iter_mut().zip(prepped_snapshot.iter()) {
+            enrich_prediction_from_prepped_row(pred, raw_row);
+            let f1_r = build_f1_row_from_prediction(pred);
+            all_f1_rows.push(f1_r.clone());
+            mod_f1_rows.push(f1_r);
+        }
+        csv_tables.insert(format!("{}-predictions.csv", module), mod_f1_rows);
+        csv_tables.insert(format!("{}-likelihoods.csv", module), res.mp_rows.clone());
+        csv_tables.insert(
+            format!("{}-tariff-scores.csv", module),
+            build_tariff_scores_rows(&res.model.cause_list, &res.user_data),
+        );
+        csv_tables.insert(
+            format!("{}-tariff-ranks.csv", module),
+            build_tariff_ranks_rows(&res.model.cause_list, &res.user_data, false),
+        );
+        csv_tables.insert(
+            format!("{}-external-ranks.csv", module),
+            build_tariff_ranks_rows(&res.model.cause_list, &res.user_data, true),
+        );
+        let pred_causes: Vec<String> = res.predictions.iter().map(|p| p.cause34.clone()).collect();
+        csv_tables.insert(
+            format!("{}-endorsement-rates.csv", module),
+            build_endorsement_rates_rows(
+                module,
+                &symptom_headers,
+                &symptom_matrix,
+                &pred_causes,
+                short_form,
+                options.freetext,
+                options.hce,
+            ),
+        );
+        preds_by_mod.insert(module, res.predictions.clone());
+        predictions.extend(res.predictions);
+
+        let normalize_counts = |counts: &BTreeMap<String, f64>| -> BTreeMap<String, f64> {
+            let total: f64 = counts.values().sum();
+            let mut m = BTreeMap::new();
+            if total > 0.0 {
+                for (k, &v) in counts {
+                    m.insert(k.clone(), v / total);
+                }
+            }
+            m
+        };
+        let both_map = normalize_counts(&res.cause_counts);
+        let male_map = normalize_counts(&res.counts_by_sex[&1]);
+        let female_map = normalize_counts(&res.counts_by_sex[&2]);
+
+        let cfg = get_tariff_config(module);
+        let cause_num_by_name: HashMap<&str, i32> =
+            cfg.causes.iter().map(|&(num, name)| (name, num)).collect();
+        let mut rounded_both = BTreeMap::new();
+        let mut mod_table_rows = Vec::new();
+        let mut mod_csmf_csv_rows = vec![vec![
+            "cause34".to_string(),
+            "cause list #".to_string(),
+            "icd10".to_string(),
+            "all".to_string(),
+            "male".to_string(),
+            "female".to_string(),
+        ]];
+        for cause in both_map.keys() {
+            let c_num = cause_num_by_name
+                .get(cause.as_str())
+                .map(|n| n.to_string())
+                .unwrap_or_default();
+            let icd = icds::get_icd(module, cause).unwrap_or("").to_string();
+            let all_s = round_py(both_map.get(cause).copied().unwrap_or(0.0), 3);
+            let male_s = round_py(male_map.get(cause).copied().unwrap_or(0.0), 3);
+            let female_s = round_py(female_map.get(cause).copied().unwrap_or(0.0), 3);
+            let all_v = all_s.parse::<f64>().unwrap_or(0.0);
+            let male_v = male_s.parse::<f64>().unwrap_or(0.0);
+            let female_v = female_s.parse::<f64>().unwrap_or(0.0);
+            rounded_both.insert(cause.clone(), all_v);
+            mod_csmf_csv_rows.push(vec![
+                cause.clone(),
+                c_num.clone(),
+                icd.clone(),
+                all_s,
+                male_s,
+                female_s,
+            ]);
+            mod_table_rows.push(SmartVaCsmfRow {
+                cause34: cause.clone(),
+                cause_list_number: Some(c_num),
+                icd10: icd,
+                all: all_v,
+                male: male_v,
+                female: female_v,
+            });
+        }
+        csv_tables.insert(format!("{}-csmf.csv", module), mod_csmf_csv_rows);
+        mod_csmfs.insert(
+            module,
+            HashMap::from([("both", both_map), ("male", male_map), ("female", female_map)]),
+        );
+        match module {
+            "adult" => {
+                csmf_adult = rounded_both;
+                csmf_adult_rows = mod_table_rows;
+            }
+            "child" => {
+                csmf_child = rounded_both;
+                csmf_child_rows = mod_table_rows;
+            }
+            "neonate" => {
+                csmf_neonate = rounded_both;
+                csmf_neonate_rows = mod_table_rows;
+            }
+            _ => {}
+        }
+    }
+    csv_tables.insert("individual-cause-of-death.csv".to_string(), all_f1_rows);
+
+    let mut csmf_all = BTreeMap::new();
+    let mut csmf_rows = Vec::new();
+    let mut gbd_level1_csmf_rows = Vec::new();
+    let mut causes_of_death_rows = Vec::new();
+    let mut age_groupings_rows = Vec::new();
+
+    let total_preds = predictions.len();
+    if total_preds > 0 {
+        let total_f = total_preds as f64;
+        let mut all_csmf: BTreeMap<String, HashMap<&str, f64>> = BTreeMap::new();
+        for module in MODULES {
+            let weight = (preds_by_mod[module].len() as f64) / total_f;
+            if let Some(m_csmf) = mod_csmfs.get(module) {
+                for (&sex_lbl, values) in m_csmf {
+                    for (cause, &val) in values {
+                        *all_csmf
+                            .entry(cause.clone())
+                            .or_default()
+                            .entry(sex_lbl)
+                            .or_insert(0.0) += val * weight;
+                    }
+                }
+            }
+        }
+        let mut csmf_csv_rows = vec![vec![
+            "cause34".to_string(),
+            "icd10".to_string(),
+            "all".to_string(),
+            "male".to_string(),
+            "female".to_string(),
+        ]];
+        for (cause, sex_vals) in &all_csmf {
+            let icd = icds::get_any_icd(cause).unwrap_or("").to_string();
+            let all_s = round_py(sex_vals.get("both").copied().unwrap_or(0.0), 3);
+            let male_s = round_py(sex_vals.get("male").copied().unwrap_or(0.0), 3);
+            let female_s = round_py(sex_vals.get("female").copied().unwrap_or(0.0), 3);
+            let all_v = all_s.parse::<f64>().unwrap_or(0.0);
+            let male_v = male_s.parse::<f64>().unwrap_or(0.0);
+            let female_v = female_s.parse::<f64>().unwrap_or(0.0);
+            csmf_all.insert(cause.clone(), all_v);
+            csmf_csv_rows.push(vec![
+                cause.clone(),
+                icd.clone(),
+                all_s,
+                male_s,
+                female_s,
+            ]);
+            csmf_rows.push(SmartVaCsmfRow {
+                cause34: cause.clone(),
+                cause_list_number: None,
+                icd10: icd,
+                all: all_v,
+                male: male_v,
+                female: female_v,
+            });
+        }
+        csv_tables.insert("csmf.csv".to_string(), csmf_csv_rows);
+
+        let mut gbd_csmf: BTreeMap<&str, f64> = BTreeMap::new();
+        for module in MODULES {
+            let weight = (preds_by_mod[module].len() as f64) / total_f;
+            if let Some(both_vals) = mod_csmfs.get(module).and_then(|m| m.get("both")) {
+                for (cause, &val) in both_vals {
+                    if let Some(gbd_code) = gbd_causes::get_gbd_level1(module, cause) {
+                        *gbd_csmf.entry(gbd_code).or_insert(0.0) += val * weight;
+                    }
+                }
+            }
+        }
+        let mut gbd_csv_rows = vec![vec![
+            "cause".to_string(),
+            "cause_name".to_string(),
+            "CSMF".to_string(),
+        ]];
+        for (code, val) in gbd_csmf {
+            let name = gbd_causes::GBD_LEVEL1_CAUSE_NAMES
+                .iter()
+                .find(|&&(k, _)| k == code)
+                .map(|&(_, v)| v)
+                .unwrap_or("");
+            let csmf_s = round_py(val, 3);
+            let csmf_v = csmf_s.parse::<f64>().unwrap_or(0.0);
+            gbd_csv_rows.push(vec![code.to_string(), name.to_string(), csmf_s]);
+            gbd_level1_csmf_rows.push(SmartVaGbdCsmfRow {
+                cause: code.to_string(),
+                cause_name: name.to_string(),
+                csmf: csmf_v,
+            });
+        }
+        csv_tables.insert("gbd-level1-csmf.csv".to_string(), gbd_csv_rows);
+
+        // causes-of-death.csv
+        let age_groups_order: [(&str, &str); 14] = [
+            ("neonate0", " 00 days"),
+            ("neonate1", " 00-07 days"),
+            ("neonate2", " 08-28 days"),
+            ("child1", " 29 days - <1 year"),
+            ("child2", "01-04 years"),
+            ("child3", "05-11 years"),
+            ("adult1", "12-19 years"),
+            ("adult2", "20-29 years"),
+            ("adult3", "30-39 years"),
+            ("adult4", "40-49 years"),
+            ("adult5", "50-59 years"),
+            ("adult6", "60-69 years"),
+            ("adult7", "70-79 years"),
+            ("adult8", "80+"),
+        ];
+        let mut cod_counts: HashMap<(&str, &str, String), usize> = HashMap::new();
+        let mut mod_causes: HashMap<&str, BTreeSet<String>> = HashMap::new();
+        for module in MODULES {
+            mod_causes.insert(module, BTreeSet::new());
+            for pred in &preds_by_mod[module] {
+                let cause = pred.cause34.clone();
+                mod_causes.get_mut(module).unwrap().insert(cause.clone());
+                let age_grp = if cause == "Stillbirth" {
+                    " 00 days"
+                } else {
+                    bin_ages_for_table(module, pred.age.unwrap_or(0.0))
+                };
+                let sex_lbl = match pred.sex.unwrap_or(0) {
+                    1 => "Male",
+                    2 => "Female",
+                    _ => "Missing",
+                };
+                *cod_counts.entry((age_grp, sex_lbl, cause)).or_insert(0) += 1;
+            }
+        }
+        let mut cod_csv_rows = vec![vec![
+            "module".to_string(),
+            "cause34".to_string(),
+            "age".to_string(),
+            "sex".to_string(),
+            "counts".to_string(),
+        ]];
+        for (age_i, age_grp) in age_groups_order {
+            let module = &age_i[..age_i.len() - 1];
+            for sex_lbl in ["Male", "Female", "Missing"] {
+                if let Some(c_set) = mod_causes.get(module) {
+                    for cause in c_set {
+                        if let Some(&cnt) = cod_counts.get(&(age_grp, sex_lbl, cause.clone())) {
+                            if cnt > 0 {
+                                cod_csv_rows.push(vec![
+                                    module.to_string(),
+                                    cause.clone(),
+                                    age_grp.to_string(),
+                                    sex_lbl.to_string(),
+                                    cnt.to_string(),
+                                ]);
+                                causes_of_death_rows.push(SmartVaCausesOfDeathRow {
+                                    module: module.to_string(),
+                                    cause34: cause.clone(),
+                                    age: age_grp.to_string(),
+                                    sex: sex_lbl.to_string(),
+                                    counts: cnt,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        csv_tables.insert("causes-of-death.csv".to_string(), cod_csv_rows);
+
+        // VA-data-age-groupings.csv
+        let mut ag_counts: BTreeMap<(String, String), (usize, usize, usize)> = BTreeMap::new();
+        for module in MODULES {
+            for pred in &preds_by_mod[module] {
+                let sex = pred.sex.unwrap_or(0);
+                let age_str = pred.age.map(py_float_str).unwrap_or_default();
+                let age_grp = get_five_year_age_group(&age_str);
+                let cause = pred.cause34.clone();
+                let entry = ag_counts.entry((age_grp, cause)).or_insert((0, 0, 0));
+                entry.0 += 1;
+                if sex == 1 {
+                    entry.1 += 1;
+                } else if sex == 2 {
+                    entry.2 += 1;
+                }
+            }
+        }
+        let mut ag_csv_rows = vec![vec![
+            "cause34".to_string(),
+            "icd10".to_string(),
+            "age group".to_string(),
+            "count".to_string(),
+            "male (count)".to_string(),
+            "female (count)".to_string(),
+        ]];
+        for ((age_grp, cause), (both_c, male_c, female_c)) in ag_counts {
+            let icd = icds::get_any_icd(&cause).unwrap_or("").to_string();
+            ag_csv_rows.push(vec![
+                cause.clone(),
+                icd.clone(),
+                age_grp.clone(),
+                both_c.to_string(),
+                male_c.to_string(),
+                female_c.to_string(),
+            ]);
+            age_groupings_rows.push(SmartVaAgeGroupingRow {
+                cause34: cause,
+                icd10: icd,
+                age_group: age_grp,
+                count: both_c,
+                male_count: male_c,
+                female_count: female_c,
+            });
+        }
+        csv_tables.insert("VA-data-age-groupings.csv".to_string(), ag_csv_rows);
+    }
+
+    Ok(SmartVaCliDirectoryResult {
+        total_vas: predictions.len(),
+        predictions,
+        csv_tables,
+        csmf_all,
+        csmf_adult,
+        csmf_child,
+        csmf_neonate,
+        csmf_rows,
+        csmf_adult_rows,
+        csmf_child_rows,
+        csmf_neonate_rows,
+        gbd_level1_csmf_rows,
+        causes_of_death_rows,
+        age_groupings_rows,
+        warnings: loggers.warnings.clone(),
+        report_text: format_report_text(&loggers),
+        xlsx_files_written: 0,
+        png_charts_written: 0,
+    })
+}
+
+/// Score an in-memory CSV byte buffer (`&[u8]`) 100% in memory without writing any files to disk.
+pub fn run_smartva_csv_bytes_in_memory(
+    csv_bytes: &[u8],
+    options: &SmartVaRunOptions,
+) -> Result<SmartVaCliDirectoryResult, SmartVaError> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(csv_bytes);
+    let mut records = rdr.records();
+    let Some(first_res) = records.next() else {
+        return Err(SmartVaError::ExecutionError(
+            "Input CSV buffer does not contain data.".to_string(),
+        ));
+    };
+    let raw_headers_rec = first_res.map_err(|e| SmartVaError::CsvError(e.to_string()))?;
+    let raw_headers: Vec<String> = raw_headers_rec.iter().map(|h| h.to_string()).collect();
+    let clean_headers: Vec<String> = raw_headers.iter().map(|h| format_header_name(h)).collect();
+
+    let mut rows: Vec<Row> = Vec::new();
+    for rec_res in records {
+        let rec = rec_res.map_err(|e| SmartVaError::CsvError(e.to_string()))?;
+        let mut row = Row::with_capacity(clean_headers.len());
+        for (i, clean_h) in clean_headers.iter().enumerate() {
+            let val = rec.get(i).unwrap_or("").to_string();
+            row.insert(clean_h.clone(), val);
+        }
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        return Err(SmartVaError::ExecutionError(
+            "Input CSV buffer does not contain data.".to_string(),
+        ));
+    }
+    run_smartva_in_memory(&clean_headers, &rows, options)
+}
+
+/// Read an input CSV file and score it 100% in memory without writing any output CSVs or charts.
+pub fn run_smartva_csv_in_memory(
+    input_csv: &Path,
+    options: &SmartVaRunOptions,
+) -> Result<SmartVaCliDirectoryResult, SmartVaError> {
+    if !input_csv.exists() {
+        return Err(SmartVaError::IoError(format!(
+            "Input CSV file does not exist: {}",
+            input_csv.display()
+        )));
+    }
+    let csv_bytes = fs::read(input_csv).map_err(|e| {
+        SmartVaError::IoError(format!("Failed to read {}: {}", input_csv.display(), e))
+    })?;
+    run_smartva_csv_bytes_in_memory(&csv_bytes, options)
 }
