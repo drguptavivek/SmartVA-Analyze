@@ -1,5 +1,13 @@
 name: Tests
-on: [push, pull_request]
+on:
+  push:
+    paths-ignore:
+      - "rust/**"
+      - ".github/workflows/rust-ci-release.yaml"
+  pull_request:
+    paths-ignore:
+      - "rust/**"
+      - ".github/workflows/rust-ci-release.yaml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}

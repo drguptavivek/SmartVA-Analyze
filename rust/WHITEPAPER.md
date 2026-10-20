@@ -109,4 +109,13 @@ All 15 cohorts were benchmarked on Apple Silicon (`macOS arm64`) with `--country
 
 ## 4. Conclusion
 
-`smartva-rust` demonstrates that the complete IHME SmartVA-Analyze (Tariff 2.0) pipeline — including WHO 2016/2022 questionnaire mapping, Porter2 free-text stemming, prefix LDAP logic rules, uniform validation ranking, CSMF undetermined redistribution, formatted Excel likelihood workbooks, and cohort mortality figures — can be executed in **100% pure native Rust** with **zero runtime Python dependency**, **zero JSON conversion**, **100.00% mathematical equivalence across 8,273 VAs**, and an **order-of-magnitude reduction in execution time and disk footprint**.
+## 7. Known Limitations
+
+1. **PHMRC Full & Shortened Questionnaire Forms Not Empirically Tested**: Although the PHMRC Full (`adult_*` / `child_*` / `neonate_*` / `gen_*` headers) and PHMRC Shortened (`adult_7_11` header) questionnaire branches and all downstream `CommonPrep`, `PreSymptomPrep`, `RulesPrep`, `SymptomPrep`, and `TariffPrep` modules are ported 1-for-1 in Rust, empirical benchmark validation (`8,273` VAs across `15` cohorts) was conducted exclusively on **WHO 2016 and WHO 2022 Verbal Autopsy questionnaires**. Any deployment targeting legacy PHMRC Full or PHMRC Shortened forms should first run cohort parity verification on representative PHMRC datasets.
+2. **English Output Tables & Figures**: Output labels are generated in English (`--language english`).
+
+---
+
+## 8. Conclusion
+
+`smartva-rust` demonstrates that the complete IHME SmartVA-Analyze (Tariff 2.0) pipeline — including WHO 2016/2022 questionnaire mapping, Porter2 free-text stemming, prefix LDAP logic rules, uniform validation ranking, CSMF undetermined redistribution, formatted Excel likelihood workbooks, cohort mortality figures, and in-memory JSON/Protobuf serialization — can be executed in **100% pure native Rust** with **zero runtime Python dependency**, **100.00% mathematical equivalence across 8,273 WHO VAs**, and an **order-of-magnitude reduction in execution time and disk footprint**.

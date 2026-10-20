@@ -50,7 +50,9 @@ fn parse_bool_flag(name: &str, raw: &str) -> Result<bool, String> {
 }
 
 fn print_help(prog: &str) {
-    println!(
+    let mut out = io::stdout().lock();
+    let _ = writeln!(
+        out,
         "Usage: {prog} [OPTIONS] [INPUT_CSV] [OUTPUT_DIR]\n\n\
          Drop-in Pure-Rust replacement for SmartVA-Analyze `smartva` CLI.\n\n\
          Options:\n  \
@@ -109,7 +111,7 @@ fn main() {
             print_help(prog);
             process::exit(0);
         } else if arg == "--version" {
-            println!("{VERSION_STR}");
+            let _ = writeln!(io::stdout().lock(), "{VERSION_STR}");
             process::exit(0);
         } else if arg == "--list-countries" {
             list_countries = true;
@@ -168,9 +170,12 @@ fn main() {
     let engine = SmartVaEngine::new();
 
     if list_countries {
-        println!("\nAvailable country codes:");
+        let mut out = io::stdout().lock();
+        let _ = writeln!(out, "\nAvailable country codes:");
         for c in engine.list_countries() {
-            println!("- {c}");
+            if writeln!(out, "- {c}").is_err() {
+                break;
+            }
         }
         process::exit(0);
     }

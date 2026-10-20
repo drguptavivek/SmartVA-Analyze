@@ -2,7 +2,10 @@ name: package app with PyInstaller
 
 # on: workflow_dispatch
 on:
-  push: {}
+  push:
+    paths-ignore:
+      - "rust/**"
+      - ".github/workflows/rust-ci-release.yaml"
   workflow_dispatch:
     inputs:
       generateSpecFiles:

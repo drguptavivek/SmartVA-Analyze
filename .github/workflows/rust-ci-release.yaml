@@ -90,13 +90,14 @@ jobs:
         working-directory: rust
         run: cargo test --release --locked --target ${{ matrix.target }}
 
-      - name: Smoke test CLI (--list-countries & --version)
+      - name: Smoke test CLI (--version, --list-countries, and --json)
         if: matrix.target != 'x86_64-apple-darwin'
         working-directory: rust
         shell: bash
         run: |
           ./target/${{ matrix.target }}/release/${{ matrix.bin_name }} --version
-          ./target/${{ matrix.target }}/release/${{ matrix.bin_name }} --list-countries | head -n 10
+          ./target/${{ matrix.target }}/release/${{ matrix.bin_name }} --list-countries > /dev/null
+          ./target/${{ matrix.target }}/release/${{ matrix.bin_name }} --country IND --json '{"sid":"VA-CI-001","Id10013":"yes","Id10019":"male","ageInYears":62,"Id10147":"yes"}' --format json > /dev/null
 
       - name: Package release archive
         working-directory: rust

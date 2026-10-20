@@ -203,3 +203,23 @@ While `smartva-rust` has zero Python dependency, external Python pipelines can i
 ```bash
 python3 examples/call_smartva_rs.py /path/to/input.csv /path/to/output_dir IND
 ```
+
+---
+
+## 4. Summary of Benefits & Known Limitations
+
+### Key Benefits
+1. **Zero Python / Conda Runtime Dependency**: Compiles to a single self-contained native binary (`smartva-rs`, ~3 MB) and C-ABI shared library (`libsmartva_rust.dylib` / `.so` / `.dll`) with all 9 Tariff 2.0 validation & weight CSVs embedded at compile time. Eliminates Conda/PyInstaller environments (~250+ MB), Python version conflicts, and native C-extension build issues across Linux (`x86_64`, `aarch64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`).
+2. **11.1x – 14.3x Faster Execution (`0.14s` Mean Warm Cohort Runtime)**: Across 15 real-world WHO cohorts (`8,273` VAs), total execution time drops from **`24.22s`** (upstream Python `smartva`) to **`2.18s`** warm (**`11.1x`** speedup; up to **`14.3x`** on single-module cohorts) by caching the 30,000-draw uniform validation matrices in memory (`OnceLock<Mutex<HashMap<...>>>`).
+3. **100.00% Mathematical & CSV Parity on WHO Questionnaires**: Tested across **`8,273 / 8,273`** Verbal Autopsy records (`15` cohorts) with **`0` cell differences** across all `345` generated output and intermediate CSV files (`individual-cause-of-death.csv`, `{adult,child,neonate}-predictions.csv`, `{adult,child,neonate}-likelihoods.csv`, `csmf.csv`, `gbd-level1-csmf.csv`, `causes-of-death.csv`, `VA-data-age-groupings.csv`, and all intermediate symptom/rule/tariff matrices).
+4. **Simple In-Memory Integrations (JSON & Protocol Buffers v3)**:
+   - Accepts input VA records either as standard CSV files or as JSON payloads (`--json`, `SmartVaEngine::score_json`, `smartva_score_json` FFI), converting input JSON to an in-memory CSV buffer and running the exact SmartVA CSV pipeline in memory.
+   - Converts SmartVA's standard in-memory CSV outputs directly to **JSON** (`--format json` / `--format json-extended`) or **Protocol Buffers v3** (`--format protobuf` / `--format protobuf-extended`, [`proto/smartva.proto`](./proto/smartva.proto)) at two detail levels:
+     - **Standard Level (default)**: Individual per-record CSV outputs (`individual-cause-of-death.csv`, `{module}-predictions.csv`, `{module}-likelihoods.csv`, `{module}-tariff-scores.csv`, `{module}-tariff-ranks.csv`, `{module}-external-ranks.csv`), omitting population CSMFs that are not meaningful for single-record (`N = 1`) scoring.
+     - **Extended Level (`--extended`)**: Adds cohort/population CSV outputs (`csmf.csv`, `{module}-csmf.csv`, `gbd-level1-csmf.csv`, `causes-of-death.csv`, `VA-data-age-groupings.csv`, `{module}-endorsement-rates.csv`) and `report.txt`.
+5. **Toggleable Disk I/O (`--csv` and `--charts`)**: Callers can selectively enable or disable writing the 4-folder CSV + `.xlsx` directory tree (`--csv <BOOL>` / `--no-csv`) and `.png` chart generation (`--charts <BOOL>` / `--no-charts`).
+
+### Known Limitations
+- **Not Empirically Tested on PHMRC Full / Shortened Questionnaire Forms**: While the PHMRC questionnaire detection (`PHMRC Full Questionnaire` / `PHMRC Shortened Questionnaire`) and all downstream `CommonPrep`, `PreSymptomPrep`, `RulesPrep`, `SymptomPrep`, and `TariffPrep` modules are ported 1-for-1 from upstream Python into Rust, empirical cohort validation (`8,273` VAs across `15` cohorts) has only been performed on **WHO 2016 and WHO 2022 Verbal Autopsy questionnaires**. Production use with legacy PHMRC Full or PHMRC Shortened questionnaire inputs should be validated against reference PHMRC datasets before deployment.
+- **English Output Labels Only**: `--language` currently supports English output tables/charts (Chinese and Spanish translation tables from upstream `smartva` are not bundled).
+- **v2+ Output Directory Layout**: `--legacy-format` (SmartVA v1.1 flat directory layout) is accepted for CLI flag compatibility, while file output uses the standard SmartVA v2/v3 4-folder hierarchy.
