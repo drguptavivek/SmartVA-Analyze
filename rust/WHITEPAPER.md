@@ -111,7 +111,7 @@ All 15 cohorts were benchmarked on Apple Silicon (`macOS arm64`) with `--country
 
 ## 7. Known Limitations
 
-1. **PHMRC Full & Shortened Questionnaire Forms Not Empirically Tested**: Although the PHMRC Full (`adult_*` / `child_*` / `neonate_*` / `gen_*` headers) and PHMRC Shortened (`adult_7_11` header) questionnaire branches and all downstream `CommonPrep`, `PreSymptomPrep`, `RulesPrep`, `SymptomPrep`, and `TariffPrep` modules are ported 1-for-1 in Rust, empirical benchmark validation (`8,273` VAs across `15` cohorts) was conducted exclusively on **WHO 2016 and WHO 2022 Verbal Autopsy questionnaires**. Any deployment targeting legacy PHMRC Full or PHMRC Shortened forms should first run cohort parity verification on representative PHMRC datasets.
+1. **PHMRC Full / Shortened Questionnaires (and WHO 2016 Questionnaires) Not Empirically Tested**: Although the PHMRC Full (`adult_*` / `child_*` / `neonate_*` / `gen_*` headers), PHMRC Shortened (`adult_7_11` header), and WHO 2016 (`Id10219` header) questionnaire branches and all downstream `CommonPrep`, `PreSymptomPrep`, `RulesPrep`, `SymptomPrep`, and `TariffPrep` modules are ported 1-for-1 in Rust, empirical benchmark validation (`8,273` VAs across `15` cohorts) was conducted exclusively on **WHO 2022 Verbal Autopsy questionnaires**. Any deployment targeting legacy PHMRC Full, PHMRC Shortened, or WHO 2016 forms should first run cohort parity verification on representative datasets.
 2. **English Output Tables & Figures**: Output labels are generated in English (`--language english`).
 
 ---
