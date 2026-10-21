@@ -92,8 +92,11 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let prog = args.first().map(|s| s.as_str()).unwrap_or("smartva-rs");
 
+    let mut default_opts = SmartVaRunOptions::default();
+    default_opts.country = "Unknown".to_string();
+
     let mut state = CliState {
-        opts: SmartVaRunOptions::default(),
+        opts: default_opts,
         csv_explicit: None,
         charts_explicit: None,
         json_input: None,

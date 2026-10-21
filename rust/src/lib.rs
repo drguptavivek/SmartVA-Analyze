@@ -16,6 +16,7 @@ pub mod data;
 pub mod engine;
 pub mod json;
 pub mod ldap;
+pub mod phmrc_source_prep;
 pub mod protobuf;
 pub mod stemmer;
 pub mod xlsx;

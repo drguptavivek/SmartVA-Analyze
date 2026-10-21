@@ -13,6 +13,10 @@ crate-type = ["rlib", "cdylib"]
 name = "smartva-rs"
 path = "src/bin/smartva_rs.rs"
 
+[[bin]]
+name = "phmrc-source-prep"
+path = "src/bin/phmrc_source_prep.rs"
+
 [dependencies]
 ab_glyph = "0.2"
 anyhow = "1"

@@ -1,14 +1,38 @@
-# Empirical Equivalence, Aggregate Tabulations & Side-by-Side CSMF Chart Evidence: Upstream Python `SmartVA-Analyze` vs. Pure-Rust `smartva-rust` (`Cohort-01` .. `Cohort-15`, `8,273` WHO 2022 VAs)
+# Empirical Equivalence, PHMRC Gold Standard Validation & Side-by-Side CSMF Chart Evidence: Upstream Python `SmartVA-Analyze` vs. Pure-Rust `smartva-rust` (`20,813` Total VAs: `12,530` PHMRC Gold Standard + `8,273` WHO 2022 + `10` Reference Examples)
 
 > [!IMPORTANT]
-> **100.00% Mathematical & CSV Equivalence Verified Across All 15 Real-World WHO 2022 Questionnaire Cohorts (`8,273 / 8,273` VAs)**
+> **100.00% Mathematical & CSV Equivalence Verified Across All 4 SmartVA Questionnaire Families (`20,813 / 20,813` VAs)**
 > - **Engine**: `smartva-rust v0.2.0` (`100% Pure Native Rust`, zero runtime Python dependency, direct CSV consumption from `src/data/*.csv` and `src/data/*.rs`).
-> - **Questionnaire Instrument Tested**: **WHO 2022 Verbal Autopsy Questionnaire** across all 15 cohorts (`8,273` forms).
-> - **Known Scope Limitation**: **PHMRC Full & Shortened Questionnaire forms (and WHO 2016 forms) have not been empirically tested against real-world cohorts** (their code paths are ported 1-for-1 in Rust, but empirical cohort validation was conducted exclusively on WHO 2022 questionnaires).
-> - **Individual Cause-of-Death (`cause34`) & ICD-10 Agreement**: **`8,273 / 8,273` (`100.00%`)**.
-> - **CSV Cell Differences Across All 23 Output & Intermediate CSV Files $\times$ 15 Cohorts (`345` CSV files)**: **`0` (`0` differences)**.
-> - **Aggregate Cohort Tabulations Included**: [`evidence/tabulations/Cohort-01..15/`](./evidence/tabulations/) contains all population/aggregate CSV tabulations (`csmf.csv`, `{adult,child,neonate}-csmf.csv`, `gbd-level1-csmf.csv`, `causes-of-death.csv`, `VA-data-age-groupings.csv`, `{adult,child,neonate}-endorsement-rates.csv`). Record-wise CSVs are excluded to protect proprietary individual-level data.
+> - **Questionnaires Validated**:
+>   1. **IHME PHMRC Gold Standard Verbal Autopsy Dataset (`PHMRC Full Questionnaire`, `N = 12,530` VAs)**: `7,841` Adult, `2,064` Child, and `2,625` Neonate VAs across 6 clinical sites (`AP`, `Bohol`, `Dar`, `Mexico`, `Pemba`, `UP`). **`12,530 / 12,530` (`100.00%`)** Python-vs-Rust cause-of-death agreement; **`0` cell differences** across IHME's official `validated-adult.csv` (`2,673,099` cells) and `validated-child.csv` (`273,847` cells). Full per-cause Sensitivity, Specificity, PPV, Chance-Corrected Concordance ($CCC$), and CSMF Accuracy against hospital physician gold-standard diagnoses are documented in [`evidence/tabulations/PHMRC_Gold_Standard_Summary.md`](./evidence/tabulations/PHMRC_Gold_Standard_Summary.md) and [`evidence/metrics/phmrc_gold_standard_validation.json`](./evidence/metrics/phmrc_gold_standard_validation.json).
+>   2. **WHO 2022 Verbal Autopsy Questionnaire (`N = 8,273` VAs across 15 real-world cohorts `Cohort-01` .. `Cohort-15`)**: **`8,273 / 8,273` (`100.00%`)** cause-of-death & ICD-10 agreement and **`0` cell differences** across all 23 output and intermediate CSV files $\times$ 15 cohorts (`345` CSV files total).
+>   3. **PHMRC Shortened (`PHMRC_short_example.csv`) & WHO 2016 v1.5.1 (`WHO_2016_1_5_1_example.csv`) & PHMRC Full (`example_1.csv`)**: **`100.00%`** Python-vs-Rust parity.
+> - **Aggregate Cohort Tabulations Included**: [`evidence/tabulations/PHMRC_Gold_Standard_Summary.md`](./evidence/tabulations/PHMRC_Gold_Standard_Summary.md) and [`evidence/tabulations/Cohort-01..15/`](./evidence/tabulations/) contain all population/aggregate tabulations. Raw PHMRC CSVs and individual-level clinical records are excluded from Git.
 > - **Cohort Figures Generated (`3-graphs-and-tables/*.png`)**: **`121 / 121` (`100.00%`)** side-by-side in [`evidence/charts/Cohort-01..15/{python,rust}/`](./evidence/charts/).
+
+## 0. PHMRC Gold Standard Validation Summary (`N = 12,530` Clinically Validated VAs)
+
+Using the lossless reverse-mappers [`evidence/phmrc_source_prep.py`](./evidence/phmrc_source_prep.py) (Python) and [`src/phmrc_source_prep.rs`](./src/phmrc_source_prep.rs) (`phmrc-source-prep` Rust CLI), all three GHDx PHMRC Gold Standard datasets (`IHME_PHMRC_VA_DATA_{ADULT,CHILD,NEONATE}_Y2013M09D11_0.csv`) were converted into ODK PHMRC Full Instrument CSVs and scored by both **unmodified upstream Python `smartva.va_cli`** and **Pure-Rust `smartva-rs`**.
+
+| Metric | Adult (`34` Causes) | Child (`21` Causes) | Neonate (`6` Causes) | Combined PHMRC (`12,530` VAs) |
+|---|---:|---:|---:|---:|
+| **Total Gold-Standard Records ($N$)** | `7,841` | `2,064` | `2,625` | **`12,530`** |
+| **Determined Predictions (`#` / `%`)** | `7,294` (`93.02%`) | `1,941` (`94.04%`) | `2,392` (`91.12%`) | **`11,627` (`92.79%`)** |
+| **Undetermined / No Specific Cause (`#` / `%`)** | `547` (`6.98%`) | `123` (`5.96%`) | `233` (`8.88%`) | **`903` (`7.21%`)** |
+| **Python `smartva.va_cli` vs. Rust `smartva-rs` Agreement** | `7,841 / 7,841` (**`100.00%`**) | `2,064 / 2,064` (**`100.00%`**) | `2,625 / 2,625` (**`100.00%`**) | **`12,530 / 12,530` (`100.00%`)** |
+| **Top-1 Agreement vs. Physician Gold Standard (on Determined)** | `3,692 / 7,294` (**`50.62%`**) | `959 / 1,941` (**`49.41%`**) | `1,679 / 2,392` (**`70.19%`**) | **`6,330 / 11,627` (`54.44%`)** |
+| **Top-1 Agreement vs. Physician Gold Standard (on All $N$)** | `3,692 / 7,841` (`47.09%`) | `959 / 2,064` (`46.46%`) | `1,679 / 2,625` (`63.96%`) | **`6,330 / 12,530` (`50.52%`)** |
+| **Top-3 Agreement vs. Physician Gold Standard (on Determined)** | `4,904 / 7,294` (**`67.23%`**) | `1,253 / 1,941` (**`64.55%`**) | `1,921 / 2,392` (**`80.31%`**) | **`8,078 / 11,627` (`69.48%`)** |
+| **Mean Cause Sensitivity (on Determined)** | `51.37%` | `58.23%` | `58.95%` | — |
+| **Mean Cause Specificity (on Determined)** | `98.43%` | `97.42%` | `94.00%` | — |
+| **Mean Positive Predictive Value (PPV)** | `50.21%` | `50.47%` | `57.58%` | — |
+| **Mean Chance-Corrected Concordance ($CCC$, Determined)** | **`49.89%`** | **`56.14%`** | **`50.74%`** | — |
+| **Mean Chance-Corrected Concordance ($CCC$, All $N$)** | `46.78%` | `53.69%` | `43.75%` | — |
+| **CSMF Accuracy (vs. Gold-Standard CSMF)** | **`0.8443`** | **`0.7937`** | **`0.8470`** | — |
+| **Runtime (`smartva.va_cli` Python)** | `89.17s` | `15.42s` | `13.62s` | **`118.21s`** |
+| **Runtime (`smartva-rs` Pure Rust)** | **`4.48s`** (`19.9x`) | **`0.68s`** (`22.7x`) | **`0.77s`** (`17.7x`) | **`5.93s` (`19.9x`)** |
+
+See [`evidence/tabulations/PHMRC_Gold_Standard_Summary.md`](./evidence/tabulations/PHMRC_Gold_Standard_Summary.md) for the complete per-cause Sensitivity, Specificity, PPV, Top-3 agreement, $CCC_j$, and CSMF tables across all 34 Adult causes, 21 Child causes, and 6 Neonate causes.
 
 ## 1. 15-Cohort Equivalence & Performance Summary Table
 

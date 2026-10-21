@@ -308,6 +308,7 @@ fn project_matrix_to_headers(headers: &[String], matrix: &mut [Row]) {
                 row.insert(h.clone(), String::new());
             }
         }
+        row.shrink_to_fit();
     }
 }
 
@@ -823,10 +824,12 @@ fn common_prep_in_memory(
             }
         }
 
-        // expand_row
+        // expand_row (only insert non-empty defaults and AGE_VARS to avoid ~1,600 empty String allocations per row)
         for (k, v) in add_headers.iter().zip(add_values.iter()) {
-            if !row.contains_key(k) {
-                row.insert(k.clone(), v.clone());
+            if !v.is_empty() || common_data::AGE_VARS.iter().any(|&(_, av)| av == k.as_str()) {
+                if !row.contains_key(k) {
+                    row.insert(k.clone(), v.clone());
+                }
             }
         }
 
@@ -985,9 +988,10 @@ fn common_prep_in_memory(
         matrix_data.get_mut(target_key).unwrap().push(row);
     }
 
+    let keep: HashSet<&str> = headers.iter().map(|s| s.as_str()).collect();
     for rows in matrix_data.values_mut() {
-        if !rows.is_empty() {
-            project_matrix_to_headers(&headers, rows);
+        for row in rows {
+            row.retain(|k, _| keep.contains(k.as_str()));
         }
     }
 
@@ -1277,12 +1281,32 @@ fn pre_symptom_prep_in_memory(
     let words_lookup: HashMap<&str, &str> = cfg.words_to_vars.iter().copied().collect();
 
     for row in &mut matrix {
+        for &(old_h, _) in cfg.var_conversion_map {
+            if existing_set.contains(old_h) && !row.contains_key(old_h) {
+                row.insert(old_h.to_string(), String::new());
+            }
+        }
         for (k, v) in add_headers.iter().zip(add_values.iter()) {
             if !row.contains_key(k) {
                 row.insert(k.clone(), v.clone());
             }
         }
         rename_vars_in_place(row, cfg.var_conversion_map, loggers);
+        for h in &headers {
+            if !row.contains_key(h) {
+                row.insert(h.clone(), String::new());
+            }
+        }
+        for h in &drop_set {
+            if !row.contains_key(h) {
+                row.insert(h.clone(), String::new());
+            }
+        }
+        for &((read_h, _), _) in cfg.recode_map {
+            if !row.contains_key(read_h) {
+                row.insert(read_h.to_string(), String::new());
+            }
+        }
 
         // verify_answers_for_row
         for &(variable, ranges) in answer_ranges::RANGE_LIST {
@@ -1535,6 +1559,33 @@ fn pre_symptom_prep_in_memory(
     (headers, matrix)
 }
 
+fn read_csv_matrix_sparse(path: &Path) -> Result<(Vec<String>, Vec<Row>), SmartVaError> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_path(path)
+        .map_err(|e| SmartVaError::IoError(format!("Failed to read CSV {}: {}", path.display(), e)))?;
+    let headers: Vec<String> = rdr
+        .headers()
+        .map_err(|e| SmartVaError::CsvError(e.to_string()))?
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut matrix = Vec::new();
+    for result in rdr.records() {
+        let record = result.map_err(|e| SmartVaError::CsvError(e.to_string()))?;
+        let mut row = Row::new();
+        for (i, h) in headers.iter().enumerate() {
+            let val = record.get(i).unwrap_or("");
+            if !val.is_empty() {
+                row.insert(h.clone(), val.to_string());
+            }
+        }
+        matrix.push(row);
+    }
+    Ok((headers, matrix))
+}
+
 fn run_pre_symptom_prep(
     intermediate_dir: &Path,
     module: &str,
@@ -1543,7 +1594,7 @@ fn run_pre_symptom_prep(
 ) -> Result<(), SmartVaError> {
     let cfg = get_pre_symptom_config(module);
     let in_path = intermediate_dir.join(format!("{}-prepped.csv", cfg.age_group));
-    let (headers, matrix) = read_csv_matrix(&in_path)?;
+    let (headers, matrix) = read_csv_matrix_sparse(&in_path)?;
     let (headers, matrix) =
         pre_symptom_prep_in_memory(module, headers, matrix, short_form, loggers);
     let out_path = intermediate_dir.join(format!("{}-presymptom.csv", cfg.age_group));
@@ -2753,7 +2804,7 @@ fn tariff_prep_in_memory(
                     .get(&cause34)
                     .copied()
                     .unwrap_or("Undetermined");
-                let like_name = likelihood_names[like_idx];
+                let like_name = likelihood_names[like_idx.min(likelihood_names.len() - 1)];
                 let key_sym = find_key_symptom(
                     &model.tariffs,
                     cfg.cause_reduction,
@@ -3135,42 +3186,72 @@ fn run_output_prep(
             predictions_by_mod.insert(module, Vec::new());
             continue;
         }
-        let (_, raw_rows) = read_csv_matrix(&raw_file)?;
         let (_, pred_rows) = read_csv_matrix(&pred_file)?;
+        let mut raw_rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .flexible(true)
+            .from_path(&raw_file)
+            .map_err(|e| SmartVaError::IoError(e.to_string()))?;
+        let raw_hdrs: Vec<String> = raw_rdr
+            .headers()
+            .map_err(|e| SmartVaError::CsvError(e.to_string()))?
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let r_idx = |name: &str| raw_hdrs.iter().position(|h| h == name);
+        let i_interview = r_idx("interviewdate");
+        let i_nat = r_idx("gen_6_7");
+        let i_name = r_idx("gen_5_0");
+        let i_name2 = r_idx("gen_5_0c");
+        let i_sur = r_idx("gen_5_0a");
+        let i_sur2 = r_idx("gen_5_0a2");
+        let i_g1 = r_idx("gen_2_3a");
+        let i_g2 = r_idx("gen_2_3b");
+        let i_g3 = r_idx("gen_2_3c");
+        let i_g4 = r_idx("gen_2_3d");
+        let i_g5 = r_idx("gen_2_3e");
+        let i_b1 = r_idx("gen_5_1a");
+        let i_b2 = r_idx("gen_5_1b");
+        let i_b3 = r_idx("gen_5_1c");
+        let i_d1 = r_idx("gen_5_3a");
+        let i_d2 = r_idx("gen_5_3b");
+        let i_d3 = r_idx("gen_5_3c");
+        let cell = |rec: &csv::StringRecord, opt_i: Option<usize>| -> String {
+            opt_i.and_then(|i| rec.get(i)).unwrap_or("").to_string()
+        };
+
         let mut mod_f1_rows = vec![f1_headers.clone()];
 
-        for (raw_row, pred_row) in raw_rows.iter().zip(pred_rows.iter()) {
-            let mut interview_date = raw_row
-                .get("interviewdate")
-                .cloned()
-                .unwrap_or_default();
+        for (raw_rec_res, pred_row) in raw_rdr.records().zip(pred_rows.iter()) {
+            let raw_rec = raw_rec_res.map_err(|e| SmartVaError::CsvError(e.to_string()))?;
+            let mut interview_date = cell(&raw_rec, i_interview);
             if is_invalid_interview_date(&interview_date) {
                 interview_date.clear();
             }
             let cause34_str = pred_row.get("cause34").map(|s| s.as_str()).unwrap_or("");
             let icd = icds::get_icd(module, cause34_str).unwrap_or("");
             let birth_date = make_output_date(
-                raw_row.get("gen_5_1a").map(|s| s.as_str()).unwrap_or(""),
-                raw_row.get("gen_5_1b").map(|s| s.as_str()).unwrap_or(""),
-                raw_row.get("gen_5_1c").map(|s| s.as_str()).unwrap_or(""),
+                &cell(&raw_rec, i_b1),
+                &cell(&raw_rec, i_b2),
+                &cell(&raw_rec, i_b3),
             );
             let death_date = make_output_date(
-                raw_row.get("gen_5_3a").map(|s| s.as_str()).unwrap_or(""),
-                raw_row.get("gen_5_3b").map(|s| s.as_str()).unwrap_or(""),
-                raw_row.get("gen_5_3c").map(|s| s.as_str()).unwrap_or(""),
+                &cell(&raw_rec, i_d1),
+                &cell(&raw_rec, i_d2),
+                &cell(&raw_rec, i_d3),
             );
             let r = vec![
                 pred_row.get("sid").cloned().unwrap_or_default(),
-                raw_row.get("gen_6_7").cloned().unwrap_or_default(),
-                raw_row.get("gen_5_0").cloned().unwrap_or_default(),
-                raw_row.get("gen_5_0c").cloned().unwrap_or_default(),
-                raw_row.get("gen_5_0a").cloned().unwrap_or_default(),
-                raw_row.get("gen_5_0a2").cloned().unwrap_or_default(),
-                raw_row.get("gen_2_3a").cloned().unwrap_or_default(),
-                raw_row.get("gen_2_3b").cloned().unwrap_or_default(),
-                raw_row.get("gen_2_3c").cloned().unwrap_or_default(),
-                raw_row.get("gen_2_3d").cloned().unwrap_or_default(),
-                raw_row.get("gen_2_3e").cloned().unwrap_or_default(),
+                cell(&raw_rec, i_nat),
+                cell(&raw_rec, i_name),
+                cell(&raw_rec, i_name2),
+                cell(&raw_rec, i_sur),
+                cell(&raw_rec, i_sur2),
+                cell(&raw_rec, i_g1),
+                cell(&raw_rec, i_g2),
+                cell(&raw_rec, i_g3),
+                cell(&raw_rec, i_g4),
+                cell(&raw_rec, i_g5),
                 cause34_str.to_string(),
                 pred_row.get("cause").cloned().unwrap_or_default(),
                 icd.to_string(),
@@ -3231,22 +3312,27 @@ fn run_output_prep(
                     .map(|n| n.to_string())
                     .unwrap_or_default();
                 let icd = icds::get_icd(module, cause).unwrap_or("").to_string();
-                let all_v = both_map.get(cause).copied().unwrap_or(0.0);
-                let male_v = csmf_map
+                let all_s = both_map
+                    .get(cause)
+                    .map(|&v| round_py(v, 3))
+                    .unwrap_or_else(|| "0".to_string());
+                let male_s = csmf_map
                     .get("male")
-                    .and_then(|m| m.get(cause).copied())
-                    .unwrap_or(0.0);
-                let female_v = csmf_map
+                    .and_then(|m| m.get(cause))
+                    .map(|&v| round_py(v, 3))
+                    .unwrap_or_else(|| "0".to_string());
+                let female_s = csmf_map
                     .get("female")
-                    .and_then(|m| m.get(cause).copied())
-                    .unwrap_or(0.0);
+                    .and_then(|m| m.get(cause))
+                    .map(|&v| round_py(v, 3))
+                    .unwrap_or_else(|| "0".to_string());
                 table.push(vec![
                     cause.clone(),
                     c_num,
                     icd,
-                    round_py(all_v, 3),
-                    round_py(male_v, 3),
-                    round_py(female_v, 3),
+                    all_s,
+                    male_s,
+                    female_s,
                 ]);
             }
         }
@@ -3284,9 +3370,18 @@ fn run_output_prep(
             table.push(vec![
                 cause.clone(),
                 icd,
-                round_py(sex_vals.get("both").copied().unwrap_or(0.0), 3),
-                round_py(sex_vals.get("male").copied().unwrap_or(0.0), 3),
-                round_py(sex_vals.get("female").copied().unwrap_or(0.0), 3),
+                sex_vals
+                    .get("both")
+                    .map(|&v| round_py(v, 3))
+                    .unwrap_or_else(|| "0".to_string()),
+                sex_vals
+                    .get("male")
+                    .map(|&v| round_py(v, 3))
+                    .unwrap_or_else(|| "0".to_string()),
+                sex_vals
+                    .get("female")
+                    .map(|&v| round_py(v, 3))
+                    .unwrap_or_else(|| "0".to_string()),
             ]);
         }
         write_csv_rows(&f2.join("csmf.csv"), &table)?;
@@ -3398,30 +3493,50 @@ fn run_output_prep(
         .collect();
 
     for module in MODULES {
-        // 1. _recode_prepped_files -> {module}-raw-data.csv
+        // 1. _recode_prepped_files -> {module}-raw-data.csv (streamed row-by-row)
         let prepped_file = intermediate_dir.join(format!("{}-prepped.csv", module));
         if prepped_file.exists() {
-            let (p_headers, mut p_rows) = read_csv_matrix(&prepped_file)?;
-            for row in &mut p_rows {
-                for (k, v) in row.iter_mut() {
+            let mut rdr = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .flexible(true)
+                .from_path(&prepped_file)
+                .map_err(|e| SmartVaError::IoError(e.to_string()))?;
+            let p_headers: Vec<String> = rdr
+                .headers()
+                .map_err(|e| SmartVaError::CsvError(e.to_string()))?
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let raw_out_path = f4_inter.join(format!("{}-raw-data.csv", module));
+            let file = File::create(&raw_out_path)
+                .map_err(|e| SmartVaError::IoError(e.to_string()))?;
+            let mut wtr = csv::WriterBuilder::new()
+                .terminator(csv::Terminator::CRLF)
+                .from_writer(BufWriter::new(file));
+            wtr.write_record(&p_headers)
+                .map_err(|e| SmartVaError::CsvError(e.to_string()))?;
+            for rec_res in rdr.records() {
+                let rec = rec_res.map_err(|e| SmartVaError::CsvError(e.to_string()))?;
+                wtr.write_record(p_headers.iter().enumerate().map(|(i, k)| {
+                    let v = rec.get(i).unwrap_or("");
                     let iv = safe_int(Some(v));
                     let k_str = k.as_str();
                     if yes_no_q_set.contains(k_str) {
-                        *v = yes_no_l_map.get(&iv).copied().unwrap_or("").to_string();
+                        yes_no_l_map.get(&iv).copied().unwrap_or("")
                     } else if dur_cat_set.contains(k_str) {
-                        *v = dur_l_map.get(&iv).copied().unwrap_or("").to_string();
+                        dur_l_map.get(&iv).copied().unwrap_or("")
                     } else if word_col_set.contains(k_str) {
-                        *v = word_l_map.get(&iv).copied().unwrap_or("").to_string();
+                        word_l_map.get(&iv).copied().unwrap_or("")
                     } else if let Some(inner) = cat_l_map.get(k_str) {
-                        *v = inner.get(&iv).copied().unwrap_or("").to_string();
+                        inner.get(&iv).copied().unwrap_or("")
+                    } else {
+                        v
                     }
-                }
+                }))
+                .map_err(|e| SmartVaError::CsvError(e.to_string()))?;
             }
-            write_csv_matrix(
-                &f4_inter.join(format!("{}-raw-data.csv", module)),
-                &p_headers,
-                &p_rows,
-            )?;
+            wtr.flush()
+                .map_err(|e| SmartVaError::IoError(e.to_string()))?;
         }
 
         // 2. _copy_intermediate_files -> {module}-symptom.csv
@@ -3799,35 +3914,144 @@ fn read_csv_raw_rows(path: &Path) -> Option<Vec<Vec<String>>> {
     }
 }
 
-fn enrich_prediction_from_prepped_row(pred: &mut SmartVaPrediction, raw_row: &Row) {
-    let mut interview_date = raw_row
-        .get("interviewdate")
-        .cloned()
-        .unwrap_or_default();
-    if is_invalid_interview_date(&interview_date) {
-        interview_date.clear();
+#[derive(Default, Clone)]
+struct PreppedDemographics {
+    national_id: String,
+    name: String,
+    name2: String,
+    surname: String,
+    surname2: String,
+    geography1: String,
+    geography2: String,
+    geography3: String,
+    geography4: String,
+    geography5: String,
+    birth_date: String,
+    death_date: String,
+    interview_date: String,
+}
+
+impl PreppedDemographics {
+    fn from_row(raw_row: &Row) -> Self {
+        let mut interview_date = raw_row
+            .get("interviewdate")
+            .cloned()
+            .unwrap_or_default();
+        if is_invalid_interview_date(&interview_date) {
+            interview_date.clear();
+        }
+        Self {
+            national_id: raw_row.get("gen_6_7").cloned().unwrap_or_default(),
+            name: raw_row.get("gen_5_0").cloned().unwrap_or_default(),
+            name2: raw_row.get("gen_5_0c").cloned().unwrap_or_default(),
+            surname: raw_row.get("gen_5_0a").cloned().unwrap_or_default(),
+            surname2: raw_row.get("gen_5_0a2").cloned().unwrap_or_default(),
+            geography1: raw_row.get("gen_2_3a").cloned().unwrap_or_default(),
+            geography2: raw_row.get("gen_2_3b").cloned().unwrap_or_default(),
+            geography3: raw_row.get("gen_2_3c").cloned().unwrap_or_default(),
+            geography4: raw_row.get("gen_2_3d").cloned().unwrap_or_default(),
+            geography5: raw_row.get("gen_2_3e").cloned().unwrap_or_default(),
+            birth_date: make_output_date(
+                raw_row.get("gen_5_1a").map(|s| s.as_str()).unwrap_or(""),
+                raw_row.get("gen_5_1b").map(|s| s.as_str()).unwrap_or(""),
+                raw_row.get("gen_5_1c").map(|s| s.as_str()).unwrap_or(""),
+            ),
+            death_date: make_output_date(
+                raw_row.get("gen_5_3a").map(|s| s.as_str()).unwrap_or(""),
+                raw_row.get("gen_5_3b").map(|s| s.as_str()).unwrap_or(""),
+                raw_row.get("gen_5_3c").map(|s| s.as_str()).unwrap_or(""),
+            ),
+            interview_date,
+        }
     }
-    pred.national_id = raw_row.get("gen_6_7").cloned().unwrap_or_default();
-    pred.name = raw_row.get("gen_5_0").cloned().unwrap_or_default();
-    pred.name2 = raw_row.get("gen_5_0c").cloned().unwrap_or_default();
-    pred.surname = raw_row.get("gen_5_0a").cloned().unwrap_or_default();
-    pred.surname2 = raw_row.get("gen_5_0a2").cloned().unwrap_or_default();
-    pred.geography1 = raw_row.get("gen_2_3a").cloned().unwrap_or_default();
-    pred.geography2 = raw_row.get("gen_2_3b").cloned().unwrap_or_default();
-    pred.geography3 = raw_row.get("gen_2_3c").cloned().unwrap_or_default();
-    pred.geography4 = raw_row.get("gen_2_3d").cloned().unwrap_or_default();
-    pred.geography5 = raw_row.get("gen_2_3e").cloned().unwrap_or_default();
-    pred.birth_date = make_output_date(
-        raw_row.get("gen_5_1a").map(|s| s.as_str()).unwrap_or(""),
-        raw_row.get("gen_5_1b").map(|s| s.as_str()).unwrap_or(""),
-        raw_row.get("gen_5_1c").map(|s| s.as_str()).unwrap_or(""),
-    );
-    pred.death_date = make_output_date(
-        raw_row.get("gen_5_3a").map(|s| s.as_str()).unwrap_or(""),
-        raw_row.get("gen_5_3b").map(|s| s.as_str()).unwrap_or(""),
-        raw_row.get("gen_5_3c").map(|s| s.as_str()).unwrap_or(""),
-    );
-    pred.interview_date = interview_date;
+
+    fn apply_to(&self, pred: &mut SmartVaPrediction) {
+        pred.national_id = self.national_id.clone();
+        pred.name = self.name.clone();
+        pred.name2 = self.name2.clone();
+        pred.surname = self.surname.clone();
+        pred.surname2 = self.surname2.clone();
+        pred.geography1 = self.geography1.clone();
+        pred.geography2 = self.geography2.clone();
+        pred.geography3 = self.geography3.clone();
+        pred.geography4 = self.geography4.clone();
+        pred.geography5 = self.geography5.clone();
+        pred.birth_date = self.birth_date.clone();
+        pred.death_date = self.death_date.clone();
+        pred.interview_date = self.interview_date.clone();
+    }
+}
+
+fn enrich_predictions_from_prepped_csv(
+    prepped_file: &Path,
+    preds: &mut [SmartVaPrediction],
+) -> Result<(), SmartVaError> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_path(prepped_file)
+        .map_err(|e| SmartVaError::IoError(e.to_string()))?;
+    let headers: Vec<String> = rdr
+        .headers()
+        .map_err(|e| SmartVaError::CsvError(e.to_string()))?
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let idx = |name: &str| headers.iter().position(|h| h == name);
+    let i_interview = idx("interviewdate");
+    let i_nat = idx("gen_6_7");
+    let i_name = idx("gen_5_0");
+    let i_name2 = idx("gen_5_0c");
+    let i_sur = idx("gen_5_0a");
+    let i_sur2 = idx("gen_5_0a2");
+    let i_g1 = idx("gen_2_3a");
+    let i_g2 = idx("gen_2_3b");
+    let i_g3 = idx("gen_2_3c");
+    let i_g4 = idx("gen_2_3d");
+    let i_g5 = idx("gen_2_3e");
+    let i_b1 = idx("gen_5_1a");
+    let i_b2 = idx("gen_5_1b");
+    let i_b3 = idx("gen_5_1c");
+    let i_d1 = idx("gen_5_3a");
+    let i_d2 = idx("gen_5_3b");
+    let i_d3 = idx("gen_5_3c");
+
+    let get_cell = |rec: &csv::StringRecord, opt_i: Option<usize>| -> String {
+        opt_i
+            .and_then(|i| rec.get(i))
+            .unwrap_or("")
+            .to_string()
+    };
+
+    for (pred, rec_res) in preds.iter_mut().zip(rdr.records()) {
+        let rec = rec_res.map_err(|e| SmartVaError::CsvError(e.to_string()))?;
+        let mut interview_date = get_cell(&rec, i_interview);
+        if is_invalid_interview_date(&interview_date) {
+            interview_date.clear();
+        }
+        pred.national_id = get_cell(&rec, i_nat);
+        pred.name = get_cell(&rec, i_name);
+        pred.name2 = get_cell(&rec, i_name2);
+        pred.surname = get_cell(&rec, i_sur);
+        pred.surname2 = get_cell(&rec, i_sur2);
+        pred.geography1 = get_cell(&rec, i_g1);
+        pred.geography2 = get_cell(&rec, i_g2);
+        pred.geography3 = get_cell(&rec, i_g3);
+        pred.geography4 = get_cell(&rec, i_g4);
+        pred.geography5 = get_cell(&rec, i_g5);
+        pred.birth_date = make_output_date(
+            &get_cell(&rec, i_b1),
+            &get_cell(&rec, i_b2),
+            &get_cell(&rec, i_b3),
+        );
+        pred.death_date = make_output_date(
+            &get_cell(&rec, i_d1),
+            &get_cell(&rec, i_d2),
+            &get_cell(&rec, i_d3),
+        );
+        pred.interview_date = interview_date;
+    }
+    Ok(())
 }
 
 fn format_report_text(loggers: &ReportLoggers) -> String {
@@ -3958,7 +4182,6 @@ pub fn run_smartva_pipeline_directory(
     ] {
         if has_data {
             let prepped_file = intermediate_dir.join(format!("{}-prepped.csv", module));
-            let (_, prepped_rows) = read_csv_matrix(&prepped_file)?;
             run_pre_symptom_prep(&intermediate_dir, module, short_form, &mut loggers)?;
             run_rules_prep(&intermediate_dir, module)?;
             run_symptom_prep(&intermediate_dir, module, &mut loggers)?;
@@ -3971,9 +4194,7 @@ pub fn run_smartva_pipeline_directory(
                 iso3.as_deref(),
                 &mut loggers,
             )?;
-            for (pred, raw_row) in mod_preds.iter_mut().zip(prepped_rows.iter()) {
-                enrich_prediction_from_prepped_row(pred, raw_row);
-            }
+            enrich_predictions_from_prepped_csv(&prepped_file, &mut mod_preds)?;
             for stub in ["tariff-scores.csv", "tariff-ranks.csv", "external-ranks.csv"] {
                 let name = format!("{}-{}", module, stub);
                 if let Some(rows) = read_csv_raw_rows(&intermediate_dir.join(&name)) {
@@ -4278,7 +4499,8 @@ pub fn run_smartva_in_memory(
             );
             continue;
         }
-        let prepped_snapshot = mod_rows.clone();
+        let prepped_demog: Vec<PreppedDemographics> =
+            mod_rows.iter().map(PreppedDemographics::from_row).collect();
         let (ps_headers, ps_matrix) = pre_symptom_prep_in_memory(
             module,
             common_headers.clone(),
@@ -4298,8 +4520,8 @@ pub fn run_smartva_in_memory(
             &mut loggers,
         )?;
         let mut mod_f1_rows = vec![f1_headers.clone()];
-        for (pred, raw_row) in res.predictions.iter_mut().zip(prepped_snapshot.iter()) {
-            enrich_prediction_from_prepped_row(pred, raw_row);
+        for (pred, demog) in res.predictions.iter_mut().zip(prepped_demog.iter()) {
+            demog.apply_to(pred);
             let f1_r = build_f1_row_from_prediction(pred);
             all_f1_rows.push(f1_r.clone());
             mod_f1_rows.push(f1_r);
@@ -4367,9 +4589,18 @@ pub fn run_smartva_in_memory(
                 .map(|n| n.to_string())
                 .unwrap_or_default();
             let icd = icds::get_icd(module, cause).unwrap_or("").to_string();
-            let all_s = round_py(both_map.get(cause).copied().unwrap_or(0.0), 3);
-            let male_s = round_py(male_map.get(cause).copied().unwrap_or(0.0), 3);
-            let female_s = round_py(female_map.get(cause).copied().unwrap_or(0.0), 3);
+            let all_s = both_map
+                .get(cause)
+                .map(|&v| round_py(v, 3))
+                .unwrap_or_else(|| "0".to_string());
+            let male_s = male_map
+                .get(cause)
+                .map(|&v| round_py(v, 3))
+                .unwrap_or_else(|| "0".to_string());
+            let female_s = female_map
+                .get(cause)
+                .map(|&v| round_py(v, 3))
+                .unwrap_or_else(|| "0".to_string());
             let all_v = all_s.parse::<f64>().unwrap_or(0.0);
             let male_v = male_s.parse::<f64>().unwrap_or(0.0);
             let female_v = female_s.parse::<f64>().unwrap_or(0.0);
@@ -4447,9 +4678,18 @@ pub fn run_smartva_in_memory(
         ]];
         for (cause, sex_vals) in &all_csmf {
             let icd = icds::get_any_icd(cause).unwrap_or("").to_string();
-            let all_s = round_py(sex_vals.get("both").copied().unwrap_or(0.0), 3);
-            let male_s = round_py(sex_vals.get("male").copied().unwrap_or(0.0), 3);
-            let female_s = round_py(sex_vals.get("female").copied().unwrap_or(0.0), 3);
+            let all_s = sex_vals
+                .get("both")
+                .map(|&v| round_py(v, 3))
+                .unwrap_or_else(|| "0".to_string());
+            let male_s = sex_vals
+                .get("male")
+                .map(|&v| round_py(v, 3))
+                .unwrap_or_else(|| "0".to_string());
+            let female_s = sex_vals
+                .get("female")
+                .map(|&v| round_py(v, 3))
+                .unwrap_or_else(|| "0".to_string());
             let all_v = all_s.parse::<f64>().unwrap_or(0.0);
             let male_v = male_s.parse::<f64>().unwrap_or(0.0);
             let female_v = female_s.parse::<f64>().unwrap_or(0.0);
