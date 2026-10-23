@@ -1,6 +1,6 @@
 [package]
 name = "smartva-rust"
-version = "0.2.0"
+version = "3.0.1"
 edition = "2024"
 description = "100% Pure Native Rust SmartVA-Analyze engine, drop-in CLI replacement (smartva-rs), and C-ABI FFI library"
 license = "MIT"
@@ -12,6 +12,10 @@ crate-type = ["rlib", "cdylib"]
 [[bin]]
 name = "smartva-rs"
 path = "src/bin/smartva_rs.rs"
+
+[[bin]]
+name = "phmrc-source-prep"
+path = "src/bin/phmrc_source_prep.rs"
 
 [dependencies]
 ab_glyph = "0.2"

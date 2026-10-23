@@ -107,15 +107,55 @@ All 15 cohorts were benchmarked on Apple Silicon (`macOS arm64`) with `--country
 
 ---
 
-## 4. Conclusion
+## 4. Empirical Two-Stage Validation on the IHME PHMRC Gold Standard Dataset (`12,530` VAs)
 
-## 7. Known Limitations
+Using the lossless reverse-mappers [`evidence/phmrc_source_prep.py`](./evidence/phmrc_source_prep.py) (Python) and [`src/phmrc_source_prep.rs`](./src/phmrc_source_prep.rs) (`phmrc-source-prep` Rust CLI), all three GHDx PHMRC Gold Standard datasets (`IHME_PHMRC_VA_DATA_{ADULT,CHILD,NEONATE}_Y2013M09D11_0.csv`, `N = 12,530` clinically validated hospital deaths across `AP`, `Bohol`, `Dar`, `Mexico`, `Pemba`, and `UP`) were converted into ODK PHMRC Full Instrument CSVs and evaluated in two stages:
 
-1. **PHMRC Full / Shortened Questionnaires (and WHO 2016 Questionnaires) Not Empirically Tested**: Although the PHMRC Full (`adult_*` / `child_*` / `neonate_*` / `gen_*` headers), PHMRC Shortened (`adult_7_11` header), and WHO 2016 (`Id10219` header) questionnaire branches and all downstream `CommonPrep`, `PreSymptomPrep`, `RulesPrep`, `SymptomPrep`, and `TariffPrep` modules are ported 1-for-1 in Rust, empirical benchmark validation (`8,273` VAs across `15` cohorts) was conducted exclusively on **WHO 2022 Verbal Autopsy questionnaires**. Any deployment targeting legacy PHMRC Full, PHMRC Shortened, or WHO 2016 forms should first run cohort parity verification on representative datasets.
-2. **English Output Tables & Figures**: Output labels are generated in English (`--language english`).
+1. **100.00% Lossless Symptom Matrix Round-Trip Across All 3 Modules**: `CommonPrep -> PreSymptomPrep -> SymptomPrep` on the reverse-mapped PHMRC Adult (`7,839` rows × `341` symptom columns = `2,673,099` cells), Child (`2,059` rows × `133` symptom columns = `273,847` cells), and Neonate (`2,591` rows × `146` symptom columns = `378,286` cells) datasets matches IHME's official `validated-adult.csv`, `validated-child.csv`, and `validated-neonate.csv` with **`0` cell differences (`100.00%` exact match)** across all 3 modules.
+2. **Stage 1 (Algorithm Validation — Unmodified Python `smartva.va_cli` vs. Physician Gold Standard)**: Evaluates unmodified upstream Python `smartva.va_cli` (`v3.0.0`) against hospital physician gold-standard diagnoses (`va46` / `va34` / `gs_text34`), benchmarked against **Serina et al. (*BMC Medicine* 2015, 13:291)** (full per-cause tables in [`evidence/tabulations/PHMRC_Gold_Standard_Summary.md`](./evidence/tabulations/PHMRC_Gold_Standard_Summary.md)).
+3. **Stage 2 (Port Equivalence — Pure-Rust `smartva-rs` vs. Python `smartva.va_cli`)**: `smartva-rs` matches `smartva.va_cli` on **`12,530 / 12,530` (`100.00%`)** individual cause-of-death (`cause34` & `icd10`) records and **`100.00%` (`0` cell differences)** across all population CSMF tables (`2-csmf/{adult,child,neonate}-csmf.csv` & `2-csmf/csmf.csv`), while completing all 3 datasets in **`5.93s`** vs. **`118.21s`** in Python (**`19.9x` speedup**):
+
+| Metric | Adult (`34` Causes) | Child (`21` Causes) | Neonate (`6` Causes) | Combined PHMRC (`12,530` VAs) |
+|---|---:|---:|---:|---:|
+| **Total Gold-Standard Records ($N$)** | `7,841` | `2,064` | `2,625` | **`12,530`** |
+| **Stage 1: Determined Predictions (`#` / `%`)** | `7,294` (`93.02%`) | `1,941` (`94.04%`) | `2,429` (`92.53%`) | **`11,664` (`93.09%`)** |
+| **Stage 1: Undetermined / No Specific Cause (`#` / `%`)** | `547` (`6.98%`) | `123` (`5.96%`) | `196` (`7.47%`) | **`866` (`6.91%`)** |
+| **Stage 1: Top-1 Agreement vs. Physician Gold Standard (Determined)** | `3,692 / 7,294` (**`50.62%`**) | `959 / 1,941` (**`49.41%`**) | `1,685 / 2,429` (**`69.37%`**) | **`6,336 / 11,664` (`54.32%`)** |
+| **Stage 1: Top-1 Agreement vs. Physician Gold Standard (All $N$)** | `3,692 / 7,841` (`47.09%`) | `959 / 2,064` (`46.46%`) | `1,685 / 2,625` (`64.19%`) | **`6,336 / 12,530` (`50.57%`)** |
+| **Stage 1: Top-3 Agreement vs. Physician Gold Standard (Determined)** | `4,904 / 7,294` (**`67.23%`**) | `1,253 / 1,941` (**`64.55%`**) | `1,941 / 2,429` (**`79.91%`**) | **`8,098 / 11,664` (`69.43%`)** |
+| **Stage 1: Mean Cause Sensitivity (on Determined)** | `51.37%` | `58.23%` | `58.66%` | — |
+| **Stage 1: Mean Cause Specificity (on Determined)** | `98.43%` | `97.42%` | `93.87%` | — |
+| **Stage 1: Mean Positive Predictive Value (PPV)** | `50.21%` | `50.47%` | `57.47%` | — |
+| **Stage 1: Mean Chance-Corrected Concordance ($CCC$, Determined) [Serina 2015]** | **`49.89%`** [`50.5%`] | **`56.14%`** [`52.5%`] | **`50.39%`** [`48.0%`] | — |
+| **Stage 1: CSMF Accuracy (vs. Gold-Standard CSMF) [Serina 2015]** | **`0.8443`** [`0.770`] | **`0.7937`** [`0.783`] | **`0.8331`** [`0.826`] | — |
+| **Stage 2: Individual `cause34` & `icd10` Agreement (`smartva-rs` vs. `va_cli`)** | `7,841 / 7,841` (**`100.00%`**) | `2,064 / 2,064` (**`100.00%`**) | `2,625 / 2,625` (**`100.00%`**) | **`12,530 / 12,530` (`100.00%`)** |
+| **Stage 2: Population CSMF Table Diff (`2-csmf/*.csv`: `all`, `male`, `female`)** | **`0` cell diffs (`0.0000`)** | **`0` cell diffs (`0.0000`)** | **`0` cell diffs (`0.0000`)** | **`0` cell diffs (`0.0000`)** |
+| **Runtime (`smartva.va_cli` Python vs. `smartva-rs` Rust)** | `89.17s` vs. **`4.48s`** (`19.9x`) | `15.42s` vs. **`0.68s`** (`22.7x`) | `13.62s` vs. **`0.77s`** (`17.7x`) | `118.21s` vs. **`5.93s` (`19.9x`)** |
 
 ---
 
-## 8. Conclusion
+## 5. Known Limitations
 
-`smartva-rust` demonstrates that the complete IHME SmartVA-Analyze (Tariff 2.0) pipeline — including WHO 2016/2022 questionnaire mapping, Porter2 free-text stemming, prefix LDAP logic rules, uniform validation ranking, CSMF undetermined redistribution, formatted Excel likelihood workbooks, cohort mortality figures, and in-memory JSON/Protobuf serialization — can be executed in **100% pure native Rust** with **zero runtime Python dependency**, **100.00% mathematical equivalence across 8,273 WHO VAs**, and an **order-of-magnitude reduction in execution time and disk footprint**.
+1. **English Output Tables & Figures**: Output labels are generated in English (`--language english`).
+2. **v2/v3 4-Folder Directory Hierarchy**: `--legacy-format` (v1.1 flat output folder) is accepted for CLI compatibility while writing the standard 4-folder output structure.
+
+---
+
+## 6. Conclusion
+
+`smartva-rust` demonstrates that the complete IHME SmartVA-Analyze (Tariff 2.0) pipeline — including PHMRC Full/Shortened and WHO 2016/2022 questionnaire mapping, Porter2 free-text stemming, prefix LDAP logic rules, uniform validation ranking, CSMF undetermined redistribution, formatted Excel likelihood workbooks, cohort mortality figures, and in-memory JSON/Protobuf serialization — can be executed in **100% pure native Rust** with **zero runtime Python dependency**, **100.00% mathematical equivalence across 20,813 validated VAs (`12,530` PHMRC Gold Standard + `8,273` WHO 2022 + `10` reference examples)**, and an **order-of-magnitude reduction in execution time, memory footprint, and binary size**.
+
+---
+
+## 7. Credits, Acknowledgments & References
+
+- **Upstream SmartVA-Analyze & Tariff 2.0 Method**: Developed by the **Institute for Health Metrics and Evaluation (IHME), University of Washington** ([`ihmeuw/SmartVA-Analyze`](https://github.com/ihmeuw/SmartVA-Analyze), MIT License, Copyright © 2018 University of Washington), led by Peter Serina, Ian Riley, Andrea Stewart, Spencer L. James, Abraham D. Flaxman, Rafael Lozano, Bernardo Hernandez, Christopher J.L. Murray, Alan D. Lopez, and the IHME Verbal Autopsy team.
+- **PHMRC Gold Standard Verbal Autopsy Dataset**: Population Health Metrics Research Consortium (PHMRC) investigators and clinical sites (`AP`, `Bohol`, `Dar`, `Mexico`, `Pemba`, `UP`).
+- **WHO Verbal Autopsy Standards**: World Health Organization (WHO 2016 and WHO 2022 Verbal Autopsy instruments).
+- **Pure-Rust Port (`SmartVA-Rust` / `smartva-rs`)**: Developed and maintained by **Dr. Vivek Gupta** ([`@drguptavivek`](https://github.com/drguptavivek)), All India Institute of Medical Sciences (AIIMS), New Delhi.
+
+### References
+1. Serina P, Riley I, Stewart A, James SL, Flaxman AD, Lozano R, Hernandez B, et al. *Improving performance of the Tariff Method for assigning causes of death to verbal autopsies.* **BMC Medicine**. 2015;13:291. doi:[10.1186/s12916-015-0527-9](https://doi.org/10.1186/s12916-015-0527-9)
+2. Serina P, Riley I, Stewart A, et al. *A shortened verbal autopsy instrument for use in routine mortality surveillance systems.* **BMC Medicine**. 2015;13:302. doi:[10.1186/s12916-015-0528-8](https://doi.org/10.1186/s12916-015-0528-8)
+3. Murray CJL, Lopez AD, Black R, et al. *Population Health Metrics Research Consortium gold standard verbal autopsy validation study: design, implementation, and development of analysis datasets.* **Population Health Metrics**. 2011;9:27. doi:[10.1186/1478-7954-9-27](https://doi.org/10.1186/1478-7954-9-27)
+4. James SL, Flaxman AD, Murray CJL; Population Health Metrics Research Consortium (PHMRC). *Performance of the Tariff Method: validation of a simple additive algorithm for analysis of verbal autopsies.* **Population Health Metrics**. 2011;9:31. doi:[10.1186/1478-7954-9-31](https://doi.org/10.1186/1478-7954-9-31)
